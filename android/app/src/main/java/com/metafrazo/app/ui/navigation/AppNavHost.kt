@@ -32,17 +32,28 @@ fun AppNavHost(navController: NavHostController = rememberNavController(), start
                 onDiagnostics = { navController.navigate("diagnostics") },
             )
         }
-        composable("start") { StartMeetingScreen(onBack = { navController.popBackStack() }, onConnected = { navController.navigate("room") }) }
-        composable("join") { JoinMeetingScreen(onBack = { navController.popBackStack() }, onConnected = { navController.navigate("room") }) }
+        // Replace the lobby with the room so Back from the room never lands on a stale lobby.
+        val toRoom: () -> Unit = {
+            navController.navigate("room") {
+                popUpTo(navController.graph.startDestinationId) { inclusive = false }
+                launchSingleTop = true
+            }
+        }
+        val leaveRoom: () -> Unit = {
+            if (!navController.popBackStack("home", false)) {
+                navController.navigate("home") { popUpTo(0); launchSingleTop = true }
+            }
+        }
+        composable("start") { StartMeetingScreen(onBack = { navController.popBackStack() }, onConnected = toRoom) }
+        composable("join") { JoinMeetingScreen(onBack = { navController.popBackStack() }, onConnected = toRoom) }
         composable(
             "join/{code}",
             arguments = listOf(navArgument("code") { type = NavType.StringType }),
         ) { backStack ->
             val code = backStack.arguments?.getString("code").orEmpty()
-            JoinMeetingScreen(initialCode = code, onBack = { navController.popBackStack() }, onConnected = { navController.navigate("room") })
-            // auto-fill handled below via initial code; pass via a side effect is skipped for brevity
+            JoinMeetingScreen(initialCode = code, onBack = { navController.popBackStack() }, onConnected = toRoom)
         }
-        composable("room") { MeetingRoomScreen(onLeave = { navController.popBackStack("home", false) }, onCaptions = { navController.navigate("captions") }, onChat = { code -> navController.navigate("chat/$code") }, onNotes = { code -> navController.navigate("notes/$code") }, onTranscripts = { code -> navController.navigate("transcripts/$code") }) }
+        composable("room") { MeetingRoomScreen(onLeave = leaveRoom, onCaptions = { navController.navigate("captions") }, onChat = { code -> navController.navigate("chat/$code") }, onNotes = { code -> navController.navigate("notes/$code") }, onTranscripts = { code -> navController.navigate("transcripts/$code") }) }
         composable("transcripts/{code}", arguments = listOf(navArgument("code") { type = NavType.StringType })) { bs ->
             val code = bs.arguments?.getString("code").orEmpty()
             TranscriptScreen(meetingCode = code, onBack = { navController.popBackStack() })

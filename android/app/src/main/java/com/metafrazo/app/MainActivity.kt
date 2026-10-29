@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
 import com.metafrazo.app.feature.meeting.MeetingViewModel
+import com.metafrazo.app.core.auth.AuthRepository
 import com.metafrazo.app.ui.navigation.AppNavHost
 import com.metafrazo.app.ui.theme.MetafrazoTheme
 
@@ -20,6 +21,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val startRoute = routeFromIntent(intent)
+        AuthRepository.init(this)
+        com.metafrazo.app.core.network.Api.configure(this)
         setContent {
             MetafrazoTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {

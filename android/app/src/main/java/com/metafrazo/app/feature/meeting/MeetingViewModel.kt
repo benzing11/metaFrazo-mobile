@@ -1,31 +1,41 @@
 package com.metafrazo.app.feature.meeting
 
+import android.Manifest
 import android.app.Application
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.metafrazo.app.core.meeting.MeetingCode
+import com.metafrazo.app.core.meeting.MediaServerUrl
 import com.metafrazo.app.core.network.Api
+import com.metafrazo.app.core.service.MeetingForegroundService
 import io.livekit.android.LiveKit
+import io.livekit.android.events.RoomEvent
 import io.livekit.android.room.Room
-import io.livekit.android.room.participant.LocalParticipant
-import io.livekit.android.room.participant.Participant
-import io.livekit.android.room.participant.RemoteParticipant
+import io.livekit.android.room.track.LocalVideoTrack
+import io.livekit.android.room.track.Track
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
 data class MeetingUiState(
-    val status: String = "idle", // idle, creating, created, joining, connected, error, left
+    val status: String = "idle", // idle, creating, joining, connecting, connected, error, left
     val code: String? = null,
     val meetingId: String? = null,
+    val title: String? = null,
     val token: String? = null,
     val url: String? = null,
     val error: String? = null,
@@ -33,112 +43,193 @@ data class MeetingUiState(
     val cameraEnabled: Boolean = true,
     val screenSharing: Boolean = false,
     val reconnecting: Boolean = false,
-)
+    val recording: Boolean = false,
+    val recordingBusy: Boolean = false,
+    val egressId: String? = null,
+    val recordingId: String? = null,
+    val connectedAt: Long? = null,
+) {
+    val isBusy: Boolean get() = status == "creating" || status == "joining" || status == "connecting"
+}
 
 class MeetingViewModel(private val app: Application) : ViewModel() {
     companion object {
-        @Volatile var activeRoom: io.livekit.android.room.Room? = null
+        @Volatile var activeRoom: Room? = null
         fun factory(app: Application) = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T = MeetingViewModel(app) as T
         }
     }
+
     private val _state = MutableStateFlow(MeetingUiState())
     val state: StateFlow<MeetingUiState> = _state
 
     var room: Room? = null
         private set
+    private var eventsJob: Job? = null
     private var screenCaptureParams: io.livekit.android.room.track.screencapture.ScreenCaptureParams? = null
 
-    fun createMeeting(title: String? = null) {
+    /** Resets a finished or failed session so the lobby starts fresh. Keeps the user's mic/camera choice. */
+    fun resetIfIdle() {
+        val s = _state.value
+        if (room == null && !s.isBusy) {
+            _state.value = MeetingUiState(micEnabled = s.micEnabled, cameraEnabled = s.cameraEnabled)
+        }
+    }
+
+    fun setPreJoinMic(enabled: Boolean) {
+        if (room == null) _state.value = _state.value.copy(micEnabled = enabled)
+    }
+
+    fun setPreJoinCamera(enabled: Boolean) {
+        if (room == null) _state.value = _state.value.copy(cameraEnabled = enabled)
+    }
+
+    /** Creates a meeting and joins it in one step. */
+    fun startNewMeeting(title: String? = null) {
+        if (_state.value.isBusy || room != null) return
         viewModelScope.launch {
-            _state.value = _state.value.copy(status = "creating", error = null)
-            val (code, body) = Api.post("/api/meetings", "{\"title\":${title?.let { "\"$it\"" } ?: "null"}}")
-            if (code in 200..299) {
-                val json = JSONObject(body)
-                _state.value = _state.value.copy(status = "created", code = json.getString("code"), meetingId = json.getString("meetingId"))
-            } else {
-                _state.value = _state.value.copy(status = "error", error = "Create failed ($code): $body")
+            _state.value = _state.value.copy(status = "creating", error = null, code = null, meetingId = null)
+            val payload = JSONObject().apply { if (!title.isNullOrBlank()) put("title", title.trim()) }.toString()
+            val (c, body) = withContext(Dispatchers.IO) { Api.post("/api/meetings", payload) }
+            if (c !in 200..299) {
+                fail("Couldn't create meeting: ${readableError(c, body)}")
+                return@launch
             }
+            val code = runCatching { JSONObject(body).getString("code") }.getOrNull()
+            if (code == null) {
+                fail("Unexpected response from server")
+                return@launch
+            }
+            joinInternal(code)
         }
     }
 
     fun joinMeeting(codeInput: String) {
-        viewModelScope.launch {
-            _state.value = _state.value.copy(status = "joining", error = null)
-            val norm = codeInput.trim().uppercase().replace(Regex("\\s+"), "")
-            val (code, body) = Api.post("/api/meetings/join", "{\"code\":\"$norm\"}")
-            if (code in 200..299) {
-                val json = JSONObject(body)
-                _state.value = _state.value.copy(status = "joined", code = json.getString("code"), meetingId = json.getString("meetingId"))
-                fetchToken(json.getString("code"))
-            } else {
-                _state.value = _state.value.copy(status = "error", error = "Join failed ($code): $body")
-            }
+        if (_state.value.isBusy || room != null) return
+        val code = MeetingCode.extract(codeInput)
+        if (!MeetingCode.isValid(code)) {
+            fail("Meeting codes are ${MeetingCode.LENGTH} letters or numbers")
+            return
         }
+        viewModelScope.launch { joinInternal(code) }
     }
 
-    private fun fetchToken(code: String) {
-        viewModelScope.launch {
-            val (c, body) = Api.post("/api/meetings/$code/token", "{}")
-            if (c in 200..299) {
-                val json = JSONObject(body)
-                _state.value = _state.value.copy(status = "connecting", token = json.getString("token"), url = json.getString("url"))
-                connect(json.getString("url"), json.getString("token"))
-            } else {
-                _state.value = _state.value.copy(status = "error", error = "Token failed ($c): $body")
-            }
+    private suspend fun joinInternal(code: String) {
+        _state.value = _state.value.copy(status = "joining", error = null)
+        val (c, body) = withContext(Dispatchers.IO) { Api.post("/api/meetings/join", JSONObject().put("code", code).toString()) }
+        if (c !in 200..299) {
+            fail("Couldn't join: ${readableError(c, body)}")
+            return
         }
+        val json = JSONObject(body)
+        val joined = json.getString("code")
+        _state.value = _state.value.copy(
+            status = "connecting",
+            code = joined,
+            meetingId = json.optString("meetingId"),
+            title = json.optString("title").takeIf { it.isNotBlank() && it != "null" },
+        )
+        val (tc, tbody) = withContext(Dispatchers.IO) { Api.post("/api/meetings/$joined/token", "{}") }
+        if (tc !in 200..299) {
+            fail("Couldn't get access token: ${readableError(tc, tbody)}")
+            return
+        }
+        val tj = JSONObject(tbody)
+        val url = MediaServerUrl.resolve(tj.getString("url"), Api.backendUrl)
+        val token = tj.getString("token")
+        _state.value = _state.value.copy(token = token, url = url)
+        connect(url, token)
     }
 
-    private fun connect(url: String, token: String) {
-        viewModelScope.launch {
-            try {
-                val r = LiveKit.create(app)
-                room = r
-                activeRoom = r
-                r.connect(url, token)
-                r.localParticipant.setMicrophoneEnabled(_state.value.micEnabled)
-                r.localParticipant.setCameraEnabled(_state.value.cameraEnabled)
-                _state.value = _state.value.copy(status = "connected")
-                com.metafrazo.app.core.service.MeetingForegroundService.start(app)
-                viewModelScope.launch {
-                    r.events.events.collect { ev ->
-                        when (ev) {
-                            is io.livekit.android.events.RoomEvent.Reconnecting -> _state.value = _state.value.copy(reconnecting = true)
-                            is io.livekit.android.events.RoomEvent.Reconnected -> _state.value = _state.value.copy(reconnecting = false)
-                            is io.livekit.android.events.RoomEvent.Disconnected -> _state.value = _state.value.copy(status = "left", reconnecting = false)
-                            else -> { }
-                        }
-                    }
+    private suspend fun connect(url: String, token: String) {
+        val r = LiveKit.create(app)
+        try {
+            r.connect(url, token)
+        } catch (e: Exception) {
+            Log.e("MeetingVM", "connect failed", e)
+            runCatching { r.release() }
+            fail("Couldn't reach the media server at $url. Check that LiveKit is running and your phone is on the same Wi-Fi.")
+            return
+        }
+        room = r
+        activeRoom = r
+        // A denied permission or busy camera must not abort an otherwise-good connection.
+        val wantMic = _state.value.micEnabled && granted(Manifest.permission.RECORD_AUDIO)
+        val wantCam = _state.value.cameraEnabled && granted(Manifest.permission.CAMERA)
+        val micOn = runCatching { r.localParticipant.setMicrophoneEnabled(wantMic); wantMic }
+            .onFailure { Log.w("MeetingVM", "mic", it) }.getOrDefault(false)
+        val camOn = runCatching { r.localParticipant.setCameraEnabled(wantCam); wantCam }
+            .onFailure { Log.w("MeetingVM", "camera", it) }.getOrDefault(false)
+        _state.value = _state.value.copy(
+            status = "connected",
+            micEnabled = micOn,
+            cameraEnabled = camOn,
+            connectedAt = System.currentTimeMillis(),
+        )
+        MeetingForegroundService.start(app)
+        eventsJob?.cancel()
+        eventsJob = viewModelScope.launch {
+            r.events.events.collect { ev ->
+                when (ev) {
+                    is RoomEvent.Reconnecting -> _state.value = _state.value.copy(reconnecting = true)
+                    is RoomEvent.Reconnected -> _state.value = _state.value.copy(reconnecting = false)
+                    is RoomEvent.Disconnected -> if (room === r) leave()
+                    else -> {}
                 }
-            } catch (e: Exception) {
-                Log.e("MeetingVM", "connect failed", e)
-                _state.value = _state.value.copy(status = "error", error = "Connect failed: ${e.message}")
             }
         }
     }
+
+    private fun fail(message: String) {
+        _state.value = _state.value.copy(status = "error", error = message)
+    }
+
+    private fun granted(permission: String) =
+        ContextCompat.checkSelfPermission(app, permission) == PackageManager.PERMISSION_GRANTED
 
     fun toggleMic() {
         val enabled = !_state.value.micEnabled
+        if (enabled && !granted(Manifest.permission.RECORD_AUDIO)) {
+            _state.value = _state.value.copy(error = "Microphone access is off. Turn it on in system settings.")
+            return
+        }
         _state.value = _state.value.copy(micEnabled = enabled)
-        viewModelScope.launch { room?.localParticipant?.setMicrophoneEnabled(enabled) }
+        val r = room ?: return
+        viewModelScope.launch {
+            runCatching { r.localParticipant.setMicrophoneEnabled(enabled) }.onFailure {
+                _state.value = _state.value.copy(micEnabled = !enabled, error = "Microphone error: ${it.message}")
+            }
+        }
     }
 
     fun toggleCamera() {
         val enabled = !_state.value.cameraEnabled
+        if (enabled && !granted(Manifest.permission.CAMERA)) {
+            _state.value = _state.value.copy(error = "Camera access is off. Turn it on in system settings.")
+            return
+        }
         _state.value = _state.value.copy(cameraEnabled = enabled)
-        viewModelScope.launch { room?.localParticipant?.setCameraEnabled(enabled) }
+        val r = room ?: return
+        viewModelScope.launch {
+            runCatching { r.localParticipant.setCameraEnabled(enabled) }.onFailure {
+                _state.value = _state.value.copy(cameraEnabled = !enabled, error = "Camera error: ${it.message}")
+            }
+        }
+    }
+
+    fun switchCamera() {
+        val track = room?.localParticipant?.getTrackPublication(Track.Source.CAMERA)?.track as? LocalVideoTrack ?: return
+        runCatching { track.switchCamera() }.onFailure { Log.w("MeetingVM", "switch camera", it) }
     }
 
     fun startScreenShare(resultIntent: Intent) {
         viewModelScope.launch {
             val r = room ?: return@launch
-            val notification = buildNotification(app)
             val params = io.livekit.android.room.track.screencapture.ScreenCaptureParams(
                 resultIntent,
                 1001,
-                notification,
+                buildNotification(app),
                 { },
             )
             screenCaptureParams = params
@@ -179,17 +270,75 @@ class MeetingViewModel(private val app: Application) : ViewModel() {
             .build()
     }
 
+    fun toggleRecording() {
+        val s = _state.value
+        val code = s.code ?: return
+        if (s.recordingBusy) return
+        viewModelScope.launch {
+            _state.value = _state.value.copy(recordingBusy = true, error = null)
+            if (!s.recording) {
+                val (c, body) = withContext(Dispatchers.IO) {
+                    Api.post("/api/meetings/$code/recordings/start", "{\"mode\":\"standard\"}")
+                }
+                if (c in 200..299) {
+                    val j = JSONObject(body)
+                    _state.value = _state.value.copy(
+                        recording = true,
+                        recordingBusy = false,
+                        egressId = j.optString("egressId"),
+                        recordingId = j.optString("recordingId"),
+                    )
+                } else {
+                    _state.value = _state.value.copy(
+                        recordingBusy = false,
+                        error = "Recording unavailable: ${readableError(c, body)}",
+                    )
+                }
+            } else {
+                val payload = JSONObject().put("egressId", s.egressId).put("recordingId", s.recordingId).toString()
+                val (c, body) = withContext(Dispatchers.IO) {
+                    Api.post("/api/meetings/$code/recordings/stop", payload)
+                }
+                _state.value = _state.value.copy(
+                    recording = false,
+                    recordingBusy = false,
+                    egressId = null,
+                    recordingId = null,
+                    error = if (c in 200..299) null else "Stop recording failed: ${readableError(c, body)}",
+                )
+            }
+        }
+    }
+
+    fun clearError() {
+        _state.value = _state.value.copy(error = null)
+    }
+
+    private fun readableError(code: Int, body: String): String {
+        if (code == -1) return if (body.isBlank()) "network error (is the backend URL set in Settings?)" else body
+        if (code == 404) return "meeting not found"
+        val msg = try { JSONObject(body).optString("error").takeIf { it.isNotBlank() } } catch (_: Exception) { null }
+        return msg ?: "HTTP $code"
+    }
+
     fun leave() {
-        com.metafrazo.app.core.service.MeetingForegroundService.stop(app)
-        room?.disconnect()
-        activeRoom = null
+        eventsJob?.cancel()
+        eventsJob = null
+        MeetingForegroundService.stop(app)
+        val r = room
         room = null
-        _state.value = MeetingUiState(status = "left")
+        activeRoom = null
+        screenCaptureParams = null
+        r?.disconnect()
+        r?.release()
+        _state.value = MeetingUiState(status = "left", micEnabled = _state.value.micEnabled, cameraEnabled = _state.value.cameraEnabled)
     }
 
     override fun onCleared() {
         super.onCleared()
         room?.disconnect()
+        room?.release()
         room = null
+        activeRoom = null
     }
 }
