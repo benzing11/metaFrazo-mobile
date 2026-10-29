@@ -3,11 +3,23 @@ package com.metafrazo.app.ui.screens.meeting
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -30,9 +42,11 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.CallEnd
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.ContentCopy
@@ -42,6 +56,7 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.automirrored.filled.Notes
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.automirrored.filled.ScreenShare
 import androidx.compose.material.icons.filled.Share
@@ -64,6 +79,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
@@ -76,6 +92,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -86,6 +103,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
@@ -93,9 +111,13 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.metafrazo.app.core.meeting.MeetingCode
 import com.metafrazo.app.core.screen.ScreenTranslator
+import com.metafrazo.app.core.translate.DeviceTranslator
+import com.metafrazo.app.feature.captions.CaptionsViewModel
 import com.metafrazo.app.feature.meeting.MeetingViewModel
 import com.metafrazo.app.ui.components.ParticipantTile
 import com.metafrazo.app.ui.components.ScreenTranslateOverlay
@@ -151,23 +173,67 @@ fun MeetingRoomScreen(
     val state by vm.state.collectAsState()
     val room = vm.room
     val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
     var tiles by remember { mutableStateOf<List<Tile>>(emptyList()) }
     var activeSpeakers by remember { mutableStateOf<Set<String>>(emptySet()) }
     var menuOpen by remember { mutableStateOf(false) }
     var shareSheetOpen by remember { mutableStateOf(false) }
+    var inviteBannerDismissed by rememberSaveable { mutableStateOf(false) }
     var confirmLeave by remember { mutableStateOf(false) }
     var translateScreen by remember { mutableStateOf(false) }
     val translationScope = rememberCoroutineScope()
     val screenTranslator = remember { ScreenTranslator(translationScope) }
     val screenTranslation by screenTranslator.state.collectAsState()
 
+    // Live captions overlaid on the call. Shares the active LiveKit room via MeetingViewModel.activeRoom.
+    val captionsVm: CaptionsViewModel = viewModel(
+        factory = CaptionsViewModel.factory(context.applicationContext as android.app.Application),
+        viewModelStoreOwner = context as androidx.activity.ComponentActivity,
+    )
+    val captionsState by captionsVm.state.collectAsState()
+    var captionsOn by remember { mutableStateOf(false) }
+    var captionLangPickerOpen by remember { mutableStateOf(false) }
+    val captionMicLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            captionsVm.startListening()
+        } else {
+            captionsOn = false
+            captionsVm.onMicPermissionDenied()
+        }
+    }
+
+    fun enableCaptions() {
+        captionsOn = true
+        captionsVm.attachToRoom()
+        if (ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            captionsVm.startListening()
+        } else {
+            captionMicLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    fun disableCaptions() {
+        captionsOn = false
+        captionsVm.stopListening()
+    }
+
     DisposableEffect(screenTranslator) {
-        onDispose { screenTranslator.close() }
+        onDispose {
+            screenTranslator.close()
+            captionsVm.stopListening()
+        }
     }
 
     val projectionManager = remember { context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager }
     val screenLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
         if (res.resultCode == Activity.RESULT_OK && res.data != null) vm.startScreenShare(res.data!!)
+    }
+
+    LaunchedEffect(state.code) { captionsVm.setMeetingCode(state.code) }
+
+    // Captions are on by default on the video screen: attach and start dictation once connected.
+    LaunchedEffect(state.status) {
+        if (state.status == "connected" && !captionsOn) enableCaptions()
     }
 
     fun tilesFor(p: Participant, isLocal: Boolean): List<Tile> {
@@ -228,7 +294,7 @@ fun MeetingRoomScreen(
                     participantCount = participantCount,
                     reconnecting = state.reconnecting,
                     recording = state.recording,
-                    onInvite = { shareSheetOpen = true },
+                    onCopyCode = { if (code.isNotEmpty()) clipboard.setText(AnnotatedString(code)) },
                 )
 
                 AnimatedVisibility(visible = state.error != null) {
@@ -270,8 +336,26 @@ fun MeetingRoomScreen(
                         )
                         else -> GridLayout(people, activeSpeakers, room)
                     }
-                    if (participantCount <= 1 && tiles.isNotEmpty() && screenShare == null) {
-                        WaitingBanner(code = code, onInvite = { shareSheetOpen = true }, modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp))
+                    // Hidden while captions are on so the two never stack at the bottom of the video.
+                    if (participantCount <= 1 && tiles.isNotEmpty() && screenShare == null && !inviteBannerDismissed && !captionsOn) {
+                        WaitingBanner(
+                            code = code,
+                            onInvite = { shareSheetOpen = true },
+                            onDismiss = { inviteBannerDismissed = true },
+                            modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp),
+                        )
+                    }
+                    if (captionsOn) {
+                        CaptionOverlay(
+                            captions = captionsState.captions,
+                            spokenLang = captionsState.spokenLang,
+                            targetLang = captionsState.targetLang,
+                            partial = captionsState.partial,
+                            partialTranslated = captionsState.partialTranslated,
+                            listening = captionsState.listening,
+                            hearing = captionsState.hearing,
+                            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                        )
                     }
                 }
 
@@ -279,6 +363,8 @@ fun MeetingRoomScreen(
                     micEnabled = state.micEnabled,
                     cameraEnabled = state.cameraEnabled,
                     screenSharing = state.screenSharing,
+                    captionsOn = captionsOn,
+                    onCaptions = { if (captionsOn) disableCaptions() else enableCaptions() },
                     onMic = vm::toggleMic,
                     onCamera = vm::toggleCamera,
                     onScreenShare = {
@@ -289,7 +375,16 @@ fun MeetingRoomScreen(
                     menuOpen = menuOpen,
                     onMenu = { menuOpen = it },
                     menu = {
-                        DropdownMenuItem(text = { Text("Live captions") }, leadingIcon = { Icon(Icons.Default.ClosedCaption, null) }, onClick = { menuOpen = false; onCaptions() })
+                        DropdownMenuItem(
+                            text = { Text("Caption language (${DeviceTranslator.labels[captionsState.targetLang] ?: captionsState.targetLang.uppercase()})") },
+                            leadingIcon = { Icon(Icons.Default.ClosedCaption, null) },
+                            onClick = { menuOpen = false; captionLangPickerOpen = true },
+                        )
+                        DropdownMenuItem(
+                            text = { Text(if (captionsState.speakTranslations) "Stop speaking translations" else "Speak translations aloud") },
+                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.VolumeUp, null) },
+                            onClick = { menuOpen = false; captionsVm.setSpeakTranslations(!captionsState.speakTranslations) },
+                        )
                         DropdownMenuItem(
                             text = { Text("Switch camera") },
                             leadingIcon = { Icon(Icons.Default.Cameraswitch, null) },
@@ -324,6 +419,21 @@ fun MeetingRoomScreen(
             }
         }
 
+        if (captionLangPickerOpen) {
+            ModalBottomSheet(onDismissRequest = { captionLangPickerOpen = false }) {
+                CaptionLanguageSheet(
+                    spokenLang = captionsState.spokenLang,
+                    targetLang = captionsState.targetLang,
+                    onSpokenLang = { captionsVm.setSpokenLang(it) },
+                    onTargetLang = { captionsVm.setTargetLang(it) },
+                    status = captionsState.status,
+                    engine = captionsState.engine,
+                    hardWords = captionsState.hardWords,
+                    onHardWords = { captionsVm.setHardWords(it) },
+                )
+            }
+        }
+
         if (confirmLeave) {
             AlertDialog(
                 onDismissRequest = { confirmLeave = false },
@@ -349,31 +459,44 @@ private fun RoomHeader(
     participantCount: Int,
     reconnecting: Boolean,
     recording: Boolean,
-    onInvite: () -> Unit,
+    onCopyCode: () -> Unit,
 ) {
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(connectedAt) {
         while (connectedAt != null) { now = System.currentTimeMillis(); delay(1000) }
     }
     Row(
-        Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+        Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
+            // The meeting code is always pinned at the top, tappable to copy.
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    title,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onBackground,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
+                Surface(
+                    onClick = onCopyCode,
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = CircleShape,
+                ) {
+                    Row(
+                        Modifier.padding(start = 12.dp, end = 10.dp, top = 6.dp, bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            code.ifBlank { "Meeting" },
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Icon(Icons.Default.ContentCopy, contentDescription = "Copy meeting code", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
+                    }
+                }
                 if (recording) {
                     Spacer(Modifier.width(8.dp))
                     Row(
-                        Modifier.clip(CircleShape).background(MaterialTheme.colorScheme.error).padding(horizontal = 8.dp, vertical = 2.dp),
+                        Modifier.clip(CircleShape).background(MaterialTheme.colorScheme.error).padding(horizontal = 8.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Icon(Icons.Default.FiberManualRecord, contentDescription = null, tint = Color.White, modifier = Modifier.size(8.dp))
@@ -382,21 +505,23 @@ private fun RoomHeader(
                     }
                 }
             }
+            Spacer(Modifier.height(2.dp))
             val sub = buildString {
                 if (reconnecting) append("Reconnecting…") else {
-                    append(code)
-                    connectedAt?.let { append("  ·  ").append(formatElapsed(now - it)) }
-                    append("  ·  ").append(if (participantCount == 1) "1 person" else "$participantCount people")
+                    if (title.isNotBlank() && title != "Meeting") append(title).append("  ·  ")
+                    connectedAt?.let { append(formatElapsed(now - it)).append("  ·  ") }
+                    append(if (participantCount == 1) "1 person" else "$participantCount people")
                 }
             }
             Text(
                 sub,
                 style = MaterialTheme.typography.bodySmall,
                 color = if (reconnecting) Color(0xFFFFC857) else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.semantics { if (reconnecting) liveRegion = LiveRegionMode.Polite },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 4.dp).semantics { if (reconnecting) liveRegion = LiveRegionMode.Polite },
             )
         }
-        IconButton(onClick = onInvite) { Icon(Icons.Default.PersonAdd, contentDescription = "Invite people", tint = MaterialTheme.colorScheme.onBackground) }
     }
 }
 
@@ -497,18 +622,21 @@ private fun SpotlightLayout(
 }
 
 @Composable
-private fun WaitingBanner(code: String, onInvite: () -> Unit, modifier: Modifier = Modifier) {
+private fun WaitingBanner(code: String, onInvite: () -> Unit, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
     Surface(
         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
         shape = MaterialTheme.shapes.large,
         modifier = modifier.fillMaxWidth(),
     ) {
-        Row(Modifier.padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(start = 16.dp, end = 4.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("You're the only one here", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface)
                 Text("Share code $code to invite others", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             TextButton(onClick = onInvite) { Text("Invite") }
+            IconButton(onClick = onDismiss) {
+                Icon(Icons.Default.Close, contentDescription = "Dismiss invite banner", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
     }
 }
@@ -518,6 +646,8 @@ private fun ControlBar(
     micEnabled: Boolean,
     cameraEnabled: Boolean,
     screenSharing: Boolean,
+    captionsOn: Boolean,
+    onCaptions: () -> Unit,
     onMic: () -> Unit,
     onCamera: () -> Unit,
     onScreenShare: () -> Unit,
@@ -542,6 +672,13 @@ private fun ControlBar(
             description = if (cameraEnabled) "Turn camera off" else "Turn camera on",
             off = !cameraEnabled,
             onClick = onCamera,
+        ) }
+        item { RoundControl(
+            icon = Icons.Default.ClosedCaption,
+            description = if (captionsOn) "Turn off live captions" else "Turn on live captions",
+            off = false,
+            highlighted = captionsOn,
+            onClick = onCaptions,
         ) }
         item { RoundControl(
             icon = if (screenSharing) Icons.AutoMirrored.Filled.StopScreenShare else Icons.AutoMirrored.Filled.ScreenShare,
@@ -596,12 +733,298 @@ private fun RoundControl(
     ) { Icon(icon, contentDescription = description) }
 }
 
+/** One caption line as rendered; [id] stays stable while a live partial updates. */
+private data class CaptionLine(
+    val id: String,
+    val speaker: String,
+    val fromLang: String,
+    val main: String,
+    val sub: String?,
+    val interim: Boolean,
+)
+
+private val CaptionAccent = Color(0xFF8AB4FF)
+private val CaptionLive = Color(0xFF5BE49B)
+
+/** Caption text in the reader's language, falling back to the original transcript. */
+private fun com.metafrazo.app.feature.captions.CaptionItem.textFor(targetLang: String): String =
+    (if (sourceLang == targetLang) null else translations[targetLang]?.takeIf { it.isNotBlank() }) ?: original
+
+@Composable
+private fun CaptionOverlay(
+    captions: List<com.metafrazo.app.feature.captions.CaptionItem>,
+    spokenLang: String,
+    targetLang: String,
+    partial: String,
+    partialTranslated: String,
+    listening: Boolean,
+    /** Whisper heard speech and is transcribing; it has no word-by-word partials to show. */
+    hearing: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val latest = captions.lastOrNull()
+    val speakingNow = partial.isNotBlank()
+
+    // Prefer the live partial while the user is mid-sentence; otherwise show the last final line.
+    val line: CaptionLine = when {
+        speakingNow -> {
+            val translated = partialTranslated.takeIf { it.isNotBlank() && spokenLang != targetLang }
+            CaptionLine(
+                id = "live",
+                speaker = "You",
+                fromLang = spokenLang,
+                main = translated ?: partial,
+                sub = if (translated != null) partial else null,
+                interim = true,
+            )
+        }
+        latest != null -> {
+            val main = latest.textFor(targetLang)
+            CaptionLine(
+                id = "${latest.speaker}:${latest.ts}",
+                speaker = latest.speaker,
+                fromLang = latest.sourceLang,
+                main = main,
+                sub = latest.original.takeIf { it.isNotBlank() && it != main },
+                interim = false,
+            )
+        }
+        listening -> CaptionLine(id = "idle", speaker = "You", fromLang = spokenLang, main = "", sub = null, interim = true)
+        else -> return
+    }
+    // Live dot whenever speech is being heard, including Whisper's phrase-at-a-time mode.
+    val live = line.interim || hearing
+
+    // The line before the current one, dimmed above it, so short sentences keep their context.
+    val previous = when {
+        line.id == "idle" -> null
+        speakingNow -> latest
+        else -> captions.getOrNull(captions.size - 2)
+    }?.let { it.speaker to it.textFor(targetLang) }
+
+    Surface(
+        color = Color(0xE6101218),
+        shape = RoundedCornerShape(20.dp),
+        modifier = modifier.animateContentSize(tween(160)),
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 14.dp)
+                .semantics { liveRegion = LiveRegionMode.Polite },
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            CaptionHeader(
+                speaker = if (hearing && !line.interim) "You" else line.speaker,
+                live = live,
+                fromLang = line.fromLang,
+                targetLang = targetLang,
+            )
+
+            if (previous != null) {
+                Text(
+                    if (previous.first == line.speaker) previous.second else "${previous.first}: ${previous.second}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.White.copy(alpha = 0.45f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            // Animate only when the line identity changes (a new final line). Live partials keep the
+            // same id, so their text updates in place instead of re-animating on every word.
+            AnimatedContent(
+                targetState = line,
+                contentKey = { it.id },
+                transitionSpec = {
+                    (fadeIn(tween(160)) + slideInVertically(tween(180)) { it / 5 })
+                        .togetherWith(fadeOut(tween(80)))
+                },
+                label = "captionLine",
+            ) { shown ->
+                if (shown.id == "idle") {
+                    ListeningDots(if (hearing) "Transcribing" else "Listening")
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text(
+                            shown.main,
+                            style = MaterialTheme.typography.titleLarge.copy(fontSize = 19.sp, lineHeight = 26.sp),
+                            fontWeight = FontWeight.Medium,
+                            color = Color.White,
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (!shown.sub.isNullOrBlank()) {
+                            Text(
+                                shown.sub,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color.White.copy(alpha = 0.6f),
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CaptionHeader(speaker: String, live: Boolean, fromLang: String, targetLang: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        // Breathing dot while the recognizer is hearing speech; a static CC glyph otherwise.
+        if (live) {
+            val pulse = rememberInfiniteTransition(label = "liveDot")
+            val dotAlpha by pulse.animateFloat(
+                initialValue = 0.35f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(tween(700), RepeatMode.Reverse),
+                label = "liveDotAlpha",
+            )
+            Box(
+                Modifier
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(CaptionLive.copy(alpha = dotAlpha)),
+            )
+        } else {
+            Icon(Icons.Default.ClosedCaption, contentDescription = null, tint = CaptionAccent, modifier = Modifier.size(16.dp))
+        }
+        Spacer(Modifier.width(8.dp))
+        Text(
+            speaker,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = CaptionAccent,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        Spacer(Modifier.weight(1f))
+        val badge = if (fromLang == targetLang) {
+            fromLang.uppercase()
+        } else {
+            "${fromLang.uppercase()} → ${targetLang.uppercase()}"
+        }
+        Surface(color = Color.White.copy(alpha = 0.10f), shape = CircleShape) {
+            Text(
+                badge,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White.copy(alpha = 0.85f),
+                modifier = Modifier
+                    .padding(horizontal = 10.dp, vertical = 3.dp)
+                    .semantics {
+                        contentDescription = "Captions in ${DeviceTranslator.labels[targetLang] ?: targetLang}"
+                    },
+            )
+        }
+    }
+}
+
+/** Three staggered dots shown while waiting for the first words. */
+@Composable
+private fun ListeningDots(label: String) {
+    val transition = rememberInfiniteTransition(label = "listeningDots")
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        modifier = Modifier
+            .height(26.dp)
+            .semantics { contentDescription = label },
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.titleMedium,
+            color = Color.White.copy(alpha = 0.7f),
+        )
+        repeat(3) { i ->
+            val a by transition.animateFloat(
+                initialValue = 0.2f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    tween(500, delayMillis = i * 150),
+                    RepeatMode.Reverse,
+                ),
+                label = "dot$i",
+            )
+            Box(
+                Modifier
+                    .size(6.dp)
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = a)),
+            )
+        }
+    }
+}
+
+@Composable
+private fun CaptionLanguageSheet(
+    spokenLang: String,
+    targetLang: String,
+    onSpokenLang: (String) -> Unit,
+    onTargetLang: (String) -> Unit,
+    status: String,
+    engine: String,
+    hardWords: String,
+    onHardWords: (String) -> Unit,
+) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 32.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("Captions", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+        Text("I speak", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(com.metafrazo.app.core.translate.DeviceTranslator.supported) { lang ->
+                androidx.compose.material3.FilterChip(
+                    selected = spokenLang == lang,
+                    onClick = { onSpokenLang(lang) },
+                    label = { Text(DeviceTranslator.labels[lang] ?: lang.uppercase()) },
+                )
+            }
+        }
+        Text("Show captions in", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(com.metafrazo.app.core.translate.DeviceTranslator.supported) { lang ->
+                androidx.compose.material3.FilterChip(
+                    selected = targetLang == lang,
+                    onClick = { onTargetLang(lang) },
+                    label = { Text(DeviceTranslator.labels[lang] ?: lang.uppercase()) },
+                )
+            }
+        }
+        Text("Names and terms", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        OutlinedTextField(
+            value = hardWords,
+            onValueChange = onHardWords,
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("e.g. MetaFrazo, Kubernetes, Priya") },
+            supportingText = { Text("Comma-separated. Helps the AI speech service spell these correctly.") },
+            minLines = 2,
+            maxLines = 4,
+        )
+        val engineText = when (engine) {
+            "whisper" -> "Speech engine: AI service (Whisper)"
+            "device" -> "Speech engine: on-device (AI service not reachable)"
+            else -> null
+        }
+        if (engineText != null) {
+            Text(engineText, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (status.isNotBlank()) {
+            Text(status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
 @Composable
 private fun InviteSheet(code: String, onDone: () -> Unit) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     val link = MeetingCode.joinLink(code)
     var copied by remember { mutableStateOf(false) }
+    val serverUrl = com.metafrazo.app.core.network.Api.backendUrl
+    val serverHost = runCatching { java.net.URI(serverUrl).host?.lowercase() }.getOrNull()
+    val onLoopback = serverHost == null || serverHost == "127.0.0.1" || serverHost == "localhost" || serverHost == "::1"
     Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 32.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("Invite people", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
         Text("Share this code. Others can enter it on the Join screen.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -613,6 +1036,15 @@ private fun InviteSheet(code: String, onDone: () -> Unit) {
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(vertical = 20.dp).fillMaxWidth(),
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+        }
+        if (onLoopback) {
+            Text(
+                "This phone is using $serverUrl, which only this phone can reach. Others will see " +
+                    "\"meeting not found\" until their Settings > Backend URL points to the same server " +
+                    "(for example http://<computer-LAN-IP>:3000).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
             )
         }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
@@ -628,7 +1060,8 @@ private fun InviteSheet(code: String, onDone: () -> Unit) {
                 onClick = {
                     val send = Intent(Intent.ACTION_SEND).apply {
                         type = "text/plain"
-                        putExtra(Intent.EXTRA_TEXT, "Join my MetaFrazo meeting with code $code\n$link")
+                        val serverLine = if (onLoopback) "" else "\nServer (Settings > Backend URL): $serverUrl"
+                        putExtra(Intent.EXTRA_TEXT, "Join my MetaFrazo meeting with code $code\n$link$serverLine")
                     }
                     context.startActivity(Intent.createChooser(send, "Share meeting"))
                     onDone()
