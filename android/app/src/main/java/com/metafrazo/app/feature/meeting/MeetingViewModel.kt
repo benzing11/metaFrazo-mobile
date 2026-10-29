@@ -149,7 +149,7 @@ class MeetingViewModel(private val app: Application) : ViewModel() {
         } catch (e: Exception) {
             Log.e("MeetingVM", "connect failed", e)
             runCatching { r.release() }
-            fail("Couldn't reach the media server at $url. Check that LiveKit is running and your phone is on the same Wi-Fi.")
+            fail(mediaServerError(url, e))
             return
         }
         room = r
@@ -163,6 +163,7 @@ class MeetingViewModel(private val app: Application) : ViewModel() {
             .onFailure { Log.w("MeetingVM", "camera", it) }.getOrDefault(false)
         _state.value = _state.value.copy(
             status = "connected",
+            error = null,
             micEnabled = micOn,
             cameraEnabled = camOn,
             connectedAt = System.currentTimeMillis(),
@@ -183,6 +184,23 @@ class MeetingViewModel(private val app: Application) : ViewModel() {
 
     private fun fail(message: String) {
         _state.value = _state.value.copy(status = "error", error = message)
+    }
+
+    /**
+     * Stage-specific message for a LiveKit connect failure. A loopback media URL means USB
+     * forwarding is the transport, so the actionable fix differs from a LAN setup.
+     */
+    private fun mediaServerError(url: String, e: Exception): String {
+        val host = runCatching { java.net.URI(url).host?.lowercase() }.getOrNull()
+        val isLoopback = host == "127.0.0.1" || host == "localhost" || host == "::1"
+        val detail = "${e.javaClass.simpleName}: ${e.message}"
+        return if (isLoopback) {
+            "Connected to the backend but couldn't reach the media server at $url. " +
+                "On USB, make sure `adb reverse tcp:7880 tcp:7880` and `tcp:7881 tcp:7881` are set and LiveKit is running. [$detail]"
+        } else {
+            "Connected to the backend but couldn't reach the media server at $url. " +
+                "Check that LiveKit is running and your phone is on the same Wi-Fi. [$detail]"
+        }
     }
 
     private fun granted(permission: String) =
