@@ -133,7 +133,7 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun speakAloud(item: CaptionItem) {
         val s = _state.value
-        if (!s.speakTranslations || item.isLocal) return
+        if (!s.speakTranslations) return
         // Transcribe-only for same-language captions: never speak your own language back.
         if (item.sourceLang == s.targetLang) return
         val text = item.translations[s.targetLang] ?: return
@@ -438,6 +438,9 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
             }
             val full = shown.copy(translations = TranslationPlan.merge(s.spokenLang, text, translations))
             replaceCaption(full)
+            // Read your own sentence back in the target language so solo use is audible.
+            // Skipped for same-language by speakAloud; the mic auto-pauses while TTS plays.
+            speakAloud(full)
             uploader.enqueue(full)
             startFlushLoop()
             publish(full)

@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
@@ -175,21 +176,27 @@ fun ChatScreen(meetingCode: String, onBack: () -> Unit) {
     // Translate into the reading language on-device, then read aloud if enabled.
     LaunchedEffect(messages.size, readLang, loading, speakChat) {
         if (loading) return@LaunchedEffect
-        var i = 0
-        while (i < messages.size) {
-            val m = messages[i]
+        // Snapshot the ids so new polled messages don't shift indices mid-loop; look each up by id.
+        val ids = messages.map { it.id }
+        for (id in ids) {
+            val idx = messages.indexOfFirst { it.id == id }
+            if (idx < 0) continue
+            val m = messages[idx]
             if (!m.mine && !m.failed) {
                 if (m.lang == readLang) {
-                    if (m.translated != null) messages[i] = m.copy(translated = null, translatedFor = null)
+                    if (m.translated != null) {
+                        val at = messages.indexOfFirst { it.id == id }
+                        if (at >= 0) messages[at] = messages[at].copy(translated = null, translatedFor = null)
+                    }
                 } else if (m.translatedFor != readLang && DeviceTranslator.prepare(m.lang, readLang) == null) {
                     val t = DeviceTranslator.translate(m.text, m.lang, readLang)
-                    val current = messages.getOrNull(i)
-                    if (current != null && current.id == m.id && t.isNotBlank() && t != m.text) {
-                        messages[i] = current.copy(translated = t, translatedFor = readLang)
+                    val at = messages.indexOfFirst { it.id == id }
+                    if (at >= 0 && t.isNotBlank() && t != m.text) {
+                        messages[at] = messages[at].copy(translated = t, translatedFor = readLang)
                     }
                 }
             }
-            val cur = messages.getOrNull(i)
+            val cur = messages.firstOrNull { it.id == id }
             if (cur != null && cur.id !in spoken) {
                 if (!speakChat || cur.mine || cur.failed) {
                     spoken.add(cur.id)
@@ -198,7 +205,6 @@ fun ChatScreen(meetingCode: String, onBack: () -> Unit) {
                     if (cur.translated != null) synth.speak(cur.translated, readLang) else synth.speak(cur.text, cur.lang)
                 }
             }
-            i++
         }
     }
     LaunchedEffect(messages.size) {
@@ -305,7 +311,7 @@ fun ChatScreen(meetingCode: String, onBack: () -> Unit) {
             Modifier
                 .fillMaxSize()
                 .padding(top = padding.calculateTopPadding())
-                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom)),
+                .imePadding(),
         ) {
             Box(Modifier.weight(1f)) {
                 when {
@@ -344,7 +350,10 @@ fun ChatScreen(meetingCode: String, onBack: () -> Unit) {
                 )
             }
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                Modifier
+                    .fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
@@ -383,18 +392,26 @@ private fun MessageBubble(m: Message, readLang: String, onSpeak: () -> Unit) {
             if (!m.mine) {
                 Text(m.sender, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Text(m.text, style = MaterialTheme.typography.bodyLarge)
+            val bubbleContentColor = when {
+                m.failed -> MaterialTheme.colorScheme.onErrorContainer
+                m.assistant -> MaterialTheme.colorScheme.onTertiaryContainer
+                m.mine -> MaterialTheme.colorScheme.onPrimaryContainer
+                else -> MaterialTheme.colorScheme.onSurfaceVariant
+            }
+            Text(m.text, style = MaterialTheme.typography.bodyLarge, color = bubbleContentColor)
             if (m.translated != null) {
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(6.dp))
+                HorizontalDivider(color = bubbleContentColor.copy(alpha = 0.25f))
+                Spacer(Modifier.height(6.dp))
                 Text(
                     DeviceTranslator.labels[readLang] ?: readLang.uppercase(),
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = bubbleContentColor.copy(alpha = 0.7f),
                 )
                 Text(
                     m.translated,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = bubbleContentColor,
                 )
             }
             if (m.assistant && m.citations > 0) {

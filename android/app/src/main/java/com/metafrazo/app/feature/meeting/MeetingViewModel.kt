@@ -123,6 +123,13 @@ class MeetingViewModel(private val app: Application) : ViewModel() {
     private suspend fun joinInternal(code: String) {
         _state.value = _state.value.copy(status = "joining", error = null)
         val (c, body) = withContext(Dispatchers.IO) { Api.post("/api/meetings/join", JSONObject().put("code", code).toString()) }
+        if (c == 404) {
+            fail(
+                "No meeting with code $code on ${Api.backendUrl}. Check the code, and make sure " +
+                    "this phone uses the same server as the host (Settings > Backend URL).",
+            )
+            return
+        }
         if (c !in 200..299) {
             fail("Couldn't join: ${readableError(c, body)}")
             return

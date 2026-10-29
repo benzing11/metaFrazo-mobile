@@ -39,6 +39,25 @@ class MeetingMicFeed(private val roomProvider: () -> Room?) : AudioTrackSink {
     /** True when there's a meeting mic to tap; otherwise the recognizer should use the mic directly. */
     val isAvailable: Boolean get() = currentMicTrack() != null
 
+    @Volatile private var pcmListener: ((ByteArray) -> Unit)? = null
+
+    /**
+     * Delivers 16 kHz mono PCM chunks straight to [onPcm] (called on WebRTC's audio thread, so it
+     * must not block). Returns false when there's no unmuted meeting mic to tap.
+     */
+    @Synchronized
+    fun startStreaming(onPcm: (ByteArray) -> Unit): Boolean {
+        val mic = currentMicTrack() ?: return false
+        if (mic !== track) {
+            closeTrack()
+            mic.addSink(this)
+            track = mic
+            Log.i(TAG, "attached to meeting mic track (streaming)")
+        }
+        pcmListener = onPcm
+        return true
+    }
+
     /**
      * Opens a fresh audio stream for one recognition session and returns the read end, or null
      * when no meeting mic is available. Any previous session's stream is closed.
@@ -94,7 +113,8 @@ class MeetingMicFeed(private val roomProvider: () -> Room?) : AudioTrackSink {
         numberOfFrames: Int,
         absoluteCaptureTimestampMs: Long,
     ) {
-        if (out == null || bitsPerSample != 16 || sampleRate <= 0 || numberOfChannels <= 0) return
+        val listener = pcmListener
+        if ((out == null && listener == null) || bitsPerSample != 16 || sampleRate <= 0 || numberOfChannels <= 0) return
         val src = audioData.duplicate().order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
         val ratio = sampleRate.toDouble() / TARGET_RATE
         val outFrames = (numberOfFrames / ratio).toInt()
@@ -116,7 +136,8 @@ class MeetingMicFeed(private val roomProvider: () -> Room?) : AudioTrackSink {
             bytes[i * 2] = (s and 0xFF).toByte()
             bytes[i * 2 + 1] = ((s shr 8) and 0xFF).toByte()
         }
-        queue.offer(bytes)
+        listener?.invoke(bytes)
+        if (out != null) queue.offer(bytes)
     }
 
     private fun closeSession() {
@@ -133,6 +154,7 @@ class MeetingMicFeed(private val roomProvider: () -> Room?) : AudioTrackSink {
 
     @Synchronized
     fun stop() {
+        pcmListener = null
         running = false
         writer?.interrupt()
         writer = null

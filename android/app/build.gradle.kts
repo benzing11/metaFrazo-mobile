@@ -33,8 +33,11 @@ android {
         debug {
             // `adb reverse tcp:3000 tcp:3000` (and 8000/7880/7881) makes the dev machine's
             // services reachable on the phone's own localhost, even on a different network.
-            buildConfigField("String", "BACKEND_URL", "\"http://localhost:3000\"")
-            buildConfigField("String", "AI_SERVICE_URL", "\"http://localhost:8000\"")
+            // For phones without USB: `./gradlew assembleDebug -PLAN_HOST=<computer LAN IP>` points the
+            // build at the computer directly (same Wi-Fi required).
+            val devHost = (project.findProperty("LAN_HOST") as String?)?.takeIf { it.matches(Regex("[A-Za-z0-9.\\-]+")) } ?: "localhost"
+            buildConfigField("String", "BACKEND_URL", "\"http://$devHost:3000\"")
+            buildConfigField("String", "AI_SERVICE_URL", "\"http://$devHost:8000\"")
         }
         release {
             isMinifyEnabled = true
