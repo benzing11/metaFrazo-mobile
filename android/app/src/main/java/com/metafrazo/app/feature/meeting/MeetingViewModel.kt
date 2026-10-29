@@ -73,7 +73,12 @@ class MeetingViewModel(private val app: Application) : ViewModel() {
     fun resetIfIdle() {
         val s = _state.value
         if (room == null && !s.isBusy) {
-            _state.value = MeetingUiState(micEnabled = s.micEnabled, cameraEnabled = s.cameraEnabled)
+            // Keep the reason for an involuntary exit so the lobby can show it.
+            _state.value = MeetingUiState(
+                micEnabled = s.micEnabled,
+                cameraEnabled = s.cameraEnabled,
+                error = if (s.status == "left") s.error else null,
+            )
         }
     }
 
@@ -175,7 +180,9 @@ class MeetingViewModel(private val app: Application) : ViewModel() {
                 when (ev) {
                     is RoomEvent.Reconnecting -> _state.value = _state.value.copy(reconnecting = true)
                     is RoomEvent.Reconnected -> _state.value = _state.value.copy(reconnecting = false)
-                    is RoomEvent.Disconnected -> if (room === r) leave()
+                    is RoomEvent.Disconnected -> if (room === r) {
+                        leave("Lost connection to the meeting. Check your network, then rejoin with the same code.")
+                    }
                     else -> {}
                 }
             }
@@ -339,7 +346,8 @@ class MeetingViewModel(private val app: Application) : ViewModel() {
         return msg ?: "HTTP $code"
     }
 
-    fun leave() {
+    /** Ends the session. A non-null [reason] means it was not the user's choice and is shown in the lobby. */
+    fun leave(reason: String? = null) {
         eventsJob?.cancel()
         eventsJob = null
         MeetingForegroundService.stop(app)
@@ -349,7 +357,12 @@ class MeetingViewModel(private val app: Application) : ViewModel() {
         screenCaptureParams = null
         r?.disconnect()
         r?.release()
-        _state.value = MeetingUiState(status = "left", micEnabled = _state.value.micEnabled, cameraEnabled = _state.value.cameraEnabled)
+        _state.value = MeetingUiState(
+            status = "left",
+            error = reason,
+            micEnabled = _state.value.micEnabled,
+            cameraEnabled = _state.value.cameraEnabled,
+        )
     }
 
     override fun onCleared() {

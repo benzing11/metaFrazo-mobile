@@ -6,6 +6,8 @@ from typing import Any, Optional
 from fastapi import FastAPI, File, Form, UploadFile
 from pydantic import BaseModel
 
+from app.engines import get_engine
+
 app = FastAPI(title="MetaFrazo AI Service", version="0.1.0")
 
 LANG_MAP = {"en": "eng_Latn", "ta": "tam_Taml", "hi": "hin_Deva"}
@@ -88,31 +90,38 @@ class SummaryRequest(BaseModel):
 
 class SummaryResponse(BaseModel):
     summary: str
+    abstract: str = ""
+    key_points: list[str] = []
+    decisions: list[str] = []
+    action_items: list[str] = []
+
+
+class QaSegment(BaseModel):
+    id: str = ""
+    speaker: str = ""
+    text: str
+
+
+class QaRequest(BaseModel):
+    question: str
+    context: list[QaSegment]
+
+
+class QaResponse(BaseModel):
+    answer: str
+    cited_segments: list[str]
 
 
 @app.post("/summarize", response_model=SummaryResponse)
 async def summarize(req: SummaryRequest):
-    import re
+    r = get_engine().summarize(req.text, req.max_sentences)
+    return SummaryResponse(summary=r["abstract"], **r)
 
-    text = req.text.strip()
-    if not text:
-        return SummaryResponse(summary="")
-    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\\s+", text) if s.strip()]
-    if len(sentences) <= req.max_sentences:
-        return SummaryResponse(summary=text)
-    words = re.findall(r"\\w+", text.lower())
-    freq: dict[str, int] = {}
-    for w in words:
-        if len(w) < 4:
-            continue
-        freq[w] = freq.get(w, 0) + 1
-    scored = []
-    for i, s in enumerate(sentences):
-        score = sum(freq.get(w.lower(), 0) for w in re.findall(r"\\w+", s))
-        scored.append((score, i, s))
-    scored.sort(key=lambda x: -x[0])
-    chosen = sorted(scored[: req.max_sentences], key=lambda x: x[1])
-    return SummaryResponse(summary=" ".join(c[2] for c in chosen))
+
+@app.post("/qa", response_model=QaResponse)
+async def qa(req: QaRequest):
+    r = get_engine().answer(req.question, [s.model_dump() for s in req.context])
+    return QaResponse(**r)
 
 
 @app.post("/ocr", response_model=OcrResponse)
@@ -162,33 +171,65 @@ def _get_whisper():
     return _whisper
 
 
+WHISPER_RATE = 16_000
+# Caps one upload at ~30 s of 16 kHz mono 16-bit audio so a bad client can't exhaust memory.
+MAX_PCM_BYTES = WHISPER_RATE * 2 * 30
+
+
 @app.post("/asr")
-async def asr(file: UploadFile = File(...), language: Optional[str] = Form(None)):
+async def asr(
+    file: UploadFile = File(...),
+    language: Optional[str] = Form(None),
+    encoding: Optional[str] = Form(None),
+    sample_rate: Optional[int] = Form(None),
+    initial_prompt: Optional[str] = Form(None),
+):
+    """Transcribes one utterance.
+
+    `encoding=pcm_s16le` with `sample_rate` sends raw mono PCM (what the Android app streams);
+    otherwise the upload is decoded as a container file. `initial_prompt` biases decoding toward
+    names and domain terms the caller expects.
+    """
     if not _check_module("faster_whisper"):
         return {"error": "faster-whisper not installed"}
     try:
-        data = await file.read()
-        import av
         import numpy as np
 
-        container = av.open(io.BytesIO(data))
-        audio_stream = next(s for s in container.streams if s.type == "audio")
-        frames = []
-        for frame in container.decode(audio_stream):
-            frames.append(frame.to_ndarray())
-        container.close()
-        if not frames:
-            return {"error": "no audio frames"}
-        audio = np.concatenate(frames, axis=1).flatten().astype("float32")
-        # normalize int16 -> float32 if needed
-        if audio.dtype != np.float32:
-            audio = audio.astype("float32")
-        if audio.max() > 1.0 or audio.min() < -1.0:
-            audio = audio / 32768.0
+        data = await file.read()
+        if encoding == "pcm_s16le":
+            if not sample_rate or sample_rate <= 0:
+                return {"error": "sample_rate is required for pcm_s16le"}
+            if len(data) > MAX_PCM_BYTES * max(1, sample_rate // WHISPER_RATE):
+                return {"error": "audio too long"}
+            audio = np.frombuffer(data[: len(data) - len(data) % 2], dtype="<i2").astype("float32") / 32768.0
+            if sample_rate != WHISPER_RATE:
+                # Linear resample; the app already sends 16 kHz so this is a fallback only.
+                n = int(len(audio) * WHISPER_RATE / sample_rate)
+                audio = np.interp(np.linspace(0, len(audio) - 1, n), np.arange(len(audio)), audio).astype("float32")
+        else:
+            from faster_whisper.audio import decode_audio
+
+            audio = decode_audio(io.BytesIO(data), sampling_rate=WHISPER_RATE)
+        if audio.size == 0:
+            return {"error": "no audio"}
+
+        prompt = (initial_prompt or "").strip()[:500] or None
         model = _get_whisper()
-        segments, info = model.transcribe(audio, language=language, sampling_rate=audio_stream.sample_rate)
+        segments, info = model.transcribe(
+            audio,
+            language=language or None,
+            beam_size=5,
+            vad_filter=True,
+            condition_on_previous_text=False,
+            initial_prompt=prompt,
+        )
         out = [{"text": s.text.strip(), "start": s.start, "end": s.end} for s in segments]
-        return {"language": info.language, "language_probability": info.language_probability, "segments": out}
+        return {
+            "language": info.language,
+            "language_probability": info.language_probability,
+            "text": " ".join(s["text"] for s in out if s["text"]).strip(),
+            "segments": out,
+        }
     except Exception as e:
         return {"error": str(e)}
 

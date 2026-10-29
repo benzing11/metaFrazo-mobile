@@ -50,7 +50,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ cod
   const insertTr = db.prepare("INSERT INTO translation_results (id, segment_id, target_language, translated_text, created_at) VALUES (?,?,?,?,?)");
   for (const s of parsed.data.segments) {
     const id = crypto.randomUUID();
-    insertSeg.run(id, meeting.id, s.speaker_user_id || null, s.source_lang, s.original_text, s.sequence, s.start_ms ?? null, s.end_ms ?? null, now);
+    insertSeg.run(id, meeting.id, r.uid, s.source_lang, s.original_text, s.sequence, s.start_ms ?? null, s.end_ms ?? null, now);
     ids.push(id);
     for (const t of s.translations || []) {
       insertTr.run(crypto.randomUUID(), id, t.target_lang, t.translated_text, now);

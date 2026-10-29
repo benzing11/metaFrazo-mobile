@@ -4,8 +4,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -83,7 +87,13 @@ fun NotesScreen(meetingCode: String, onBack: () -> Unit) {
         when {
             loading -> LoadingState("Loading notes…", Modifier.padding(padding))
             loadError != null -> ErrorState(loadError!!, onRetry = { reload++ }, modifier = Modifier.padding(padding))
-            else -> Column(Modifier.fillMaxSize().padding(padding).imePadding().padding(16.dp)) {
+            else -> Column(
+                Modifier
+                    .fillMaxSize()
+                    .padding(top = padding.calculateTopPadding())
+                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom))
+                    .padding(16.dp),
+            ) {
                 OutlinedTextField(
                     value = content,
                     onValueChange = { content = it },
