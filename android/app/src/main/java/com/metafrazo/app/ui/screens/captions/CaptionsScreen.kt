@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -36,6 +37,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.metafrazo.app.core.translate.DeviceTranslator
 import com.metafrazo.app.feature.captions.CaptionsViewModel
 import java.util.Locale
 
@@ -93,17 +95,27 @@ fun CaptionsScreen(
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).padding(12.dp), Arrangement.spacedBy(8.dp)) {
             Text("I speak", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("en", "ta", "hi").forEach { lang ->
-                    FilterChip(selected = state.spokenLang == lang, onClick = { vm.setSpokenLang(lang) }, label = { Text(lang.uppercase()) })
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(DeviceTranslator.supported) { lang ->
+                    FilterChip(
+                        selected = state.spokenLang == lang,
+                        onClick = { vm.setSpokenLang(lang) },
+                        label = { Text(DeviceTranslator.labels[lang] ?: lang.uppercase()) },
+                    )
                 }
             }
             Text("Translate to", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("en", "ta", "hi").forEach { lang ->
-                    FilterChip(selected = state.targetLang == lang, onClick = { vm.setTargetLang(lang) }, label = { Text(lang.uppercase()) })
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(DeviceTranslator.supported) { lang ->
+                    FilterChip(
+                        selected = state.targetLang == lang,
+                        onClick = { vm.setTargetLang(lang) },
+                        label = { Text(DeviceTranslator.labels[lang] ?: lang.uppercase()) },
+                    )
                 }
-                FilterChip(selected = state.showOriginal, onClick = { vm.toggleOriginal() }, label = { Text("Original") })
+                item {
+                    FilterChip(selected = state.showOriginal, onClick = { vm.toggleOriginal() }, label = { Text("Original") })
+                }
             }
             Button(
                 onClick = {
@@ -128,7 +140,7 @@ fun CaptionsScreen(
             }
             if (state.spokenLang == state.targetLang) {
                 Text(
-                    "Spoken and reading language match — captions stay untranslated.",
+                    "Same language selected — showing live captions without translation.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -150,9 +162,14 @@ fun CaptionsScreen(
                 items(state.captions) { c ->
                     Column {
                         Text(c.speaker, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-                        if (state.showOriginal) Text(c.original, style = MaterialTheme.typography.bodyLarge)
-                        val translated = c.translations[state.targetLang] ?: c.original
-                        if (state.targetLang != c.sourceLang) Text(translated, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.secondary)
+                        if (state.targetLang == c.sourceLang) {
+                            // Same language in and out: the transcript itself is the caption.
+                            Text(c.original, style = MaterialTheme.typography.bodyLarge)
+                        } else {
+                            if (state.showOriginal) Text(c.original, style = MaterialTheme.typography.bodyLarge)
+                            val translated = c.translations[state.targetLang] ?: c.original
+                            Text(translated, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.secondary)
+                        }
                     }
                 }
             }
@@ -177,7 +194,18 @@ fun CaptionsScreen(
 }
 
 private fun localeFor(lang: String): Locale = when (lang) {
-    "ta" -> Locale("ta", "IN")
     "hi" -> Locale("hi", "IN")
+    "ta" -> Locale("ta", "IN")
+    "te" -> Locale("te", "IN")
+    "kn" -> Locale("kn", "IN")
+    "bn" -> Locale("bn", "IN")
+    "mr" -> Locale("mr", "IN")
+    "gu" -> Locale("gu", "IN")
+    "ur" -> Locale("ur", "IN")
+    "es" -> Locale("es", "ES")
+    "fr" -> Locale("fr", "FR")
+    "de" -> Locale("de", "DE")
+    "ar" -> Locale("ar", "SA")
+    "zh" -> Locale.SIMPLIFIED_CHINESE
     else -> Locale("en", "US")
 }

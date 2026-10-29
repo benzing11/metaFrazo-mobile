@@ -25,15 +25,53 @@ sealed interface TranslateResult {
 }
 
 object DeviceTranslator {
-    val supported = listOf("en", "ta", "hi")
+    /**
+     * Curated set of languages supported for captions: major Indian languages plus
+     * widely spoken world languages. Every entry must map in [mlLang]. ML Kit downloads
+     * each pair's model on demand and then translates fully offline.
+     */
+    // Note: Malayalam is intentionally absent — ML Kit 17.0.3 has no on-device model for it.
+    val supported = listOf(
+        "en", "hi", "ta", "te", "kn", "bn", "mr", "gu", "ur",
+        "es", "fr", "de", "ar", "zh",
+    )
+
+    /** Human-readable labels for the language picker. */
+    val labels = mapOf(
+        "en" to "English",
+        "hi" to "हिन्दी",
+        "ta" to "தமிழ்",
+        "te" to "తెలుగు",
+        "kn" to "ಕನ್ನಡ",
+        "bn" to "বাংলা",
+        "mr" to "मराठी",
+        "gu" to "ગુજરાતી",
+        "ur" to "اردو",
+        "es" to "Español",
+        "fr" to "Français",
+        "de" to "Deutsch",
+        "ar" to "العربية",
+        "zh" to "中文",
+    )
 
     private val translators = mutableMapOf<String, Translator>()
     private val lock = Any()
 
     private fun mlLang(code: String): String? = when (code) {
         "en" -> TranslateLanguage.ENGLISH
-        "ta" -> TranslateLanguage.TAMIL
         "hi" -> TranslateLanguage.HINDI
+        "ta" -> TranslateLanguage.TAMIL
+        "te" -> TranslateLanguage.TELUGU
+        "kn" -> TranslateLanguage.KANNADA
+        "bn" -> TranslateLanguage.BENGALI
+        "mr" -> TranslateLanguage.MARATHI
+        "gu" -> TranslateLanguage.GUJARATI
+        "ur" -> TranslateLanguage.URDU
+        "es" -> TranslateLanguage.SPANISH
+        "fr" -> TranslateLanguage.FRENCH
+        "de" -> TranslateLanguage.GERMAN
+        "ar" -> TranslateLanguage.ARABIC
+        "zh" -> TranslateLanguage.CHINESE
         else -> null
     }
 

@@ -6,7 +6,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.metafrazo.app.core.speech.MeetingMicFeed
 import com.metafrazo.app.core.speech.SpeechRecognizerSource
+import com.metafrazo.app.core.speech.SpeechSynthesizer
 import com.metafrazo.app.core.translate.DeviceTranslator
 import com.metafrazo.app.core.translate.TranslateResult
 import com.metafrazo.app.feature.meeting.MeetingViewModel
@@ -34,14 +36,30 @@ data class CaptionsUiState(
     val spokenLang: String = "en",
     val showOriginal: Boolean = true,
     val listening: Boolean = false,
+    /** Live interim transcript in the spoken language. */
     val partial: String = "",
+    /** Live interim transcript translated into [targetLang], updated as the user speaks. */
+    val partialTranslated: String = "",
     val status: String = "",
     val error: String? = null,
     val modelReady: Boolean = false,
+    /** Read remote captions aloud in [targetLang]. */
+    val speakTranslations: Boolean = false,
+    /** Read incoming chat messages aloud. */
+    val speakChat: Boolean = false,
 )
 
 class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
     companion object {
+        private const val FLUSH_INTERVAL_MS = 10_000L
+        /** Short enough to feel instant, long enough to skip translating every recognizer tick. */
+        private const val PARTIAL_DEBOUNCE_MS = 80L
+
+        /** Outlives the ViewModel so the final flush on leave still completes. */
+        private val uploadScope = kotlinx.coroutines.CoroutineScope(
+            kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
+        )
+
         fun factory(app: Application) = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T = CaptionsViewModel(app) as T
@@ -53,6 +71,75 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
 
     private var attached = false
     private var speech: SpeechRecognizerSource? = null
+    private var partialJob: kotlinx.coroutines.Job? = null
+    private val prefs = app.getSharedPreferences("metafrazo_captions", android.content.Context.MODE_PRIVATE)
+    private var synthesizer: SpeechSynthesizer? = null
+    private val uploader = TranscriptUploader()
+    private var flushJob: kotlinx.coroutines.Job? = null
+
+    /** Tells the transcript uploader which meeting finalized captions belong to. */
+    fun setMeetingCode(code: String?) {
+        uploader.setMeetingCode(code)
+    }
+
+    init {
+        val savedTarget = prefs.getString("target_lang", null)?.takeIf { it in DeviceTranslator.supported }
+        val savedSpoken = prefs.getString("spoken_lang", null)?.takeIf { it in DeviceTranslator.supported }
+        _state.value = _state.value.copy(
+            speakTranslations = prefs.getBoolean("speak_translations", false),
+            speakChat = prefs.getBoolean("speak_chat", false),
+            targetLang = savedTarget ?: _state.value.targetLang,
+            spokenLang = savedSpoken ?: _state.value.spokenLang,
+        )
+    }
+
+    /** Lets other screens pause dictation while they play speech, so it is not re-transcribed. */
+    fun setTtsBusy(busy: Boolean) {
+        if (busy) speech?.pause() else speech?.resume()
+    }
+
+    fun setSpeakChat(enabled: Boolean) {
+        prefs.edit().putBoolean("speak_chat", enabled).apply()
+        _state.value = _state.value.copy(speakChat = enabled)
+    }
+
+    fun setSpeakTranslations(enabled: Boolean) {
+        prefs.edit().putBoolean("speak_translations", enabled).apply()
+        _state.value = _state.value.copy(speakTranslations = enabled)
+        if (!enabled) {
+            synthesizer?.stop()
+            speech?.resume()
+        }
+    }
+
+    private fun speakAloud(item: CaptionItem) {
+        val s = _state.value
+        if (!s.speakTranslations || item.isLocal) return
+        val text = item.translations[s.targetLang] ?: item.original.takeIf { item.sourceLang == s.targetLang } ?: return
+        val synth = synthesizer ?: SpeechSynthesizer(
+            context = getApplication(),
+            onBusyChanged = { busy -> if (busy) speech?.pause() else speech?.resume() },
+            onUnavailable = { msg -> _state.value = _state.value.copy(error = msg) },
+        ).also { synthesizer = it }
+        synth.speak(text, s.targetLang)
+    }
+
+    private fun startFlushLoop() {
+        if (flushJob?.isActive == true) return
+        flushJob = viewModelScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(FLUSH_INTERVAL_MS)
+                uploader.flush()
+            }
+        }
+    }
+
+    /** Pushes any buffered captions now. Runs on an app-wide scope so it survives the ViewModel. */
+    fun flushTranscript() {
+        flushJob?.cancel()
+        flushJob = null
+        uploadScope.launch { uploader.flush() }
+    }
 
     /**
      * Remote participants' preferred reading languages, keyed by LiveKit identity.
@@ -66,6 +153,7 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
         get() = SpeechRecognizerSource(getApplication(), {}, {}, {}).isAvailable
 
     fun setTargetLang(lang: String) {
+        prefs.edit().putString("target_lang", lang).apply()
         val changed = _state.value.targetLang != lang
         _state.value = _state.value.copy(targetLang = lang)
         prepareModel()
@@ -73,6 +161,7 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun setSpokenLang(lang: String) {
+        prefs.edit().putString("spoken_lang", lang).apply()
         val wasListening = _state.value.listening
         _state.value = _state.value.copy(spokenLang = lang)
         if (wasListening) {
@@ -147,15 +236,15 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
                             DeviceTranslator.prepare(sourceLang, target)
                             trans[target] = DeviceTranslator.translate(original, sourceLang, target)
                         }
-                        addCaption(
-                            CaptionItem(
-                                speaker = json.optString("speaker", "Participant"),
-                                sourceLang = sourceLang,
-                                original = original,
-                                translations = trans,
-                                ts = json.optDouble("ts", System.currentTimeMillis() / 1000.0),
-                            ),
+                        val remote = CaptionItem(
+                            speaker = json.optString("speaker", "Participant"),
+                            sourceLang = sourceLang,
+                            original = original,
+                            translations = trans,
+                            ts = json.optDouble("ts", System.currentTimeMillis() / 1000.0),
                         )
+                        addCaption(remote)
+                        speakAloud(remote)
                     } catch (e: Exception) {
                         Log.w("CaptionsVM", "bad caption payload", e)
                     }
@@ -168,12 +257,16 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
         if (_state.value.listening) return
         val source = SpeechRecognizerSource(
             context = getApplication(),
-            onPartial = { text -> _state.value = _state.value.copy(partial = text) },
+            onPartial = { text -> onPartialTranscript(text) },
             onFinal = { text ->
-                _state.value = _state.value.copy(partial = "")
-                handleLocalTranscript(text)
+                partialJob?.cancel()
+                // Keep the partial on screen until the final line is added, so the overlay never blanks.
+                handleLocalTranscript(text, livePreview = _state.value.partialTranslated)
             },
             onError = { msg -> _state.value = _state.value.copy(error = msg, listening = false) },
+            // In a call WebRTC owns the mic and Android silences a second capture, so feed the
+            // recognizer the meeting's own mic audio instead.
+            micFeed = MeetingMicFeed { MeetingViewModel.activeRoom },
         )
         if (!source.isAvailable) {
             _state.value = _state.value.copy(error = "Speech recognition is not available on this device")
@@ -185,10 +278,38 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
         prepareModel()
     }
 
+    /**
+     * Updates the interim transcript and translates it into the target language live, debounced so
+     * a fast-changing partial does not fire a translation per keystroke. Only the target language is
+     * translated here to keep the overlay instant; full multi-language fan-out happens on the final.
+     */
+    private fun onPartialTranscript(text: String) {
+        val s = _state.value
+        _state.value = s.copy(partial = text)
+        if (text.isBlank() || s.spokenLang == s.targetLang) {
+            _state.value = _state.value.copy(partialTranslated = "")
+            return
+        }
+        // Leading edge: translate the first words of a sentence immediately; only debounce
+        // follow-up partials that arrive while a translation is already in flight.
+        val inFlight = partialJob?.isActive == true
+        partialJob?.cancel()
+        partialJob = viewModelScope.launch {
+            if (inFlight) kotlinx.coroutines.delay(PARTIAL_DEBOUNCE_MS)
+            val translated = DeviceTranslator.translate(text, s.spokenLang, s.targetLang)
+            // Guard against a stale result overwriting a newer partial.
+            if (_state.value.partial == text) {
+                _state.value = _state.value.copy(partialTranslated = translated)
+            }
+        }
+    }
+
     fun stopListening() {
+        partialJob?.cancel()
+        flushTranscript()
         speech?.stop()
         speech = null
-        _state.value = _state.value.copy(listening = false, partial = "")
+        _state.value = _state.value.copy(listening = false, partial = "", partialTranslated = "")
     }
 
     /** Surfaces a clear message when the user declines the microphone prompt. */
@@ -199,15 +320,38 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    private fun handleLocalTranscript(text: String) {
+    private fun handleLocalTranscript(text: String, livePreview: String) {
         val s = _state.value
         viewModelScope.launch {
+            val ts = System.currentTimeMillis() / 1000.0
             val translations = mutableMapOf<String, String>()
             val failures = mutableListOf<String>()
-            // Translate into every supported language so each participant can read it.
-            // Each pair is prepared and translated independently: one failure must not
-            // drop the others, and a silent fallback must not masquerade as a translation.
+
+            // 1) Show the final line right away in the reader's language. Reuse the live partial
+            //    translation as a placeholder so the overlay never blanks between partial and final.
+            if (s.spokenLang != s.targetLang) {
+                if (livePreview.isNotBlank()) translations[s.targetLang] = livePreview
+                when (val r = DeviceTranslator.translateResult(text, s.spokenLang, s.targetLang)) {
+                    is TranslateResult.Translated -> translations[s.targetLang] = r.text
+                    is TranslateResult.Failed -> failures += "${s.targetLang.uppercase()}: ${r.reason}"
+                    else -> {}
+                }
+            }
+            val shown = CaptionItem(
+                speaker = "You",
+                sourceLang = s.spokenLang,
+                original = text,
+                translations = TranslationPlan.merge(s.spokenLang, text, translations),
+                ts = ts,
+                isLocal = true,
+            )
+            addCaption(shown)
+
+            // 2) Fan out to every other supported language for remote participants, off the
+            //    display path. One failure must not drop the others, and a silent fallback
+            //    must not masquerade as a translation.
             for (lang in TranslationPlan.targetsFor(s.spokenLang, DeviceTranslator.supported)) {
+                if (lang == s.targetLang) continue
                 val prepError = DeviceTranslator.prepare(s.spokenLang, lang)
                 if (prepError != null) {
                     failures += "${lang.uppercase()}: $prepError"
@@ -220,20 +364,14 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
                     is TranslateResult.SameLanguage -> {}
                 }
             }
-            val merged = TranslationPlan.merge(s.spokenLang, text, translations)
             if (failures.isNotEmpty()) {
-                _state.value = _state.value.copy(error = "Some translations failed — ${failures.joinToString("; ")}")
+                Log.w("CaptionsVM", "translation failures: ${failures.joinToString("; ")}")
             }
-            val item = CaptionItem(
-                speaker = "You",
-                sourceLang = s.spokenLang,
-                original = text,
-                translations = merged,
-                ts = System.currentTimeMillis() / 1000.0,
-                isLocal = true,
-            )
-            addCaption(item)
-            publish(item)
+            val full = shown.copy(translations = TranslationPlan.merge(s.spokenLang, text, translations))
+            replaceCaption(full)
+            uploader.enqueue(full)
+            startFlushLoop()
+            publish(full)
         }
     }
 
@@ -309,7 +447,21 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun addCaption(item: CaptionItem) {
-        _state.value = _state.value.copy(captions = (_state.value.captions + item).takeLast(200))
+        val s = _state.value
+        _state.value = if (item.isLocal) {
+            // The final line replaces the live partial in a single state update: no blank frame.
+            s.copy(captions = (s.captions + item).takeLast(200), partial = "", partialTranslated = "")
+        } else {
+            s.copy(captions = (s.captions + item).takeLast(200))
+        }
+    }
+
+    /** Swaps in the fully translated copy of a caption already on screen (matched by timestamp). */
+    private fun replaceCaption(item: CaptionItem) {
+        val s = _state.value
+        _state.value = s.copy(
+            captions = s.captions.map { if (it.isLocal && it.ts == item.ts) item else it },
+        )
     }
 
     fun clearError() {
@@ -318,12 +470,25 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         super.onCleared()
+        synthesizer?.shutdown()
+        synthesizer = null
         stopListening()
     }
 }
 
 fun localeTag(lang: String): String = when (lang) {
-    "ta" -> "ta-IN"
     "hi" -> "hi-IN"
+    "ta" -> "ta-IN"
+    "te" -> "te-IN"
+    "kn" -> "kn-IN"
+    "bn" -> "bn-IN"
+    "mr" -> "mr-IN"
+    "gu" -> "gu-IN"
+    "ur" -> "ur-IN"
+    "es" -> "es-ES"
+    "fr" -> "fr-FR"
+    "de" -> "de-DE"
+    "ar" -> "ar-SA"
+    "zh" -> "zh-CN"
     else -> "en-US"
 }
