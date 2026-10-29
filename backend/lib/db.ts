@@ -2,13 +2,18 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 
-let db: Database.Database | null = null;
+// Cache on globalThis, not module scope: Next.js dev reloads modules, and a fresh
+// native handle per reload leaves better-sqlite3 statements to be finalized after
+// their environment is torn down, which aborts the process on a native assertion.
+const globalForDb = globalThis as typeof globalThis & { __metafrazoDb?: Database.Database };
 
 export function getDb(): Database.Database {
-  if (db) return db;
+  const cached = globalForDb.__metafrazoDb;
+  if (cached) return cached;
   const dbPath = process.env.DATABASE_PATH || "./data/metafrazo.db";
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  db = new Database(dbPath);
+  const db = new Database(dbPath);
+  globalForDb.__metafrazoDb = db;
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
   db.exec("CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)");

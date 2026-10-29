@@ -41,6 +41,41 @@ def translate(text: str, src: str, tgt: str) -> str:
     return nllb_tok.batch_decode(out, skip_special_tokens=True)[0]
 
 
+async def deliver(room, base, source_text, translations, prefs):
+    """Send each recipient only their preferred language.
+
+    Participants with a known preference receive a caption carrying just that
+    language. Recipients whose preference is unknown (and the no-preference case)
+    get a broadcast with every translation so captions never disappear.
+    """
+    def lang_text(lang):
+        if lang == base["source_lang"]:
+            return source_text
+        return translations.get(lang, source_text)
+
+    remote_ids = [p.identity for p in room.remote_participants.values()]
+    known_ids = [i for i in remote_ids if i in prefs]
+
+    # One message per distinct target language, addressed to the matching recipients.
+    by_lang: dict[str, list] = {}
+    for identity in known_ids:
+        by_lang.setdefault(prefs[identity], []).append(identity)
+    for lang, ids in by_lang.items():
+        payload = {**base, "translations": {lang: lang_text(lang)}}
+        await room.local_participant.publish_data(
+            json.dumps(payload).encode(), reliable=True, destination_identities=ids,
+        )
+
+    # Fallback for recipients we have no preference for, or an empty room.
+    unknown_ids = [i for i in remote_ids if i not in prefs]
+    if unknown_ids or not remote_ids:
+        payload = {**base, "translations": translations}
+        kwargs = {"reliable": True}
+        if known_ids and unknown_ids:
+            kwargs["destination_identities"] = unknown_ids
+        await room.local_participant.publish_data(json.dumps(payload).encode(), **kwargs)
+
+
 async def main():
     token = LIVEKIT_TOKEN
     if not token:
@@ -56,6 +91,26 @@ async def main():
     print("connected to room", room.name)
 
     audio_buffers: dict[str, list] = {}
+    # identity -> preferred reading language, learned from caption_pref announcements.
+    recipient_prefs: dict[str, str] = {}
+
+    @room.on("data_received")
+    def on_data(packet: rtc.DataPacket):
+        try:
+            msg = json.loads(packet.data.decode())
+        except Exception:
+            return
+        if msg.get("type") != "caption_pref":
+            return
+        identity = msg.get("identity")
+        lang = msg.get("lang")
+        if identity and lang:
+            recipient_prefs[identity] = lang
+            print("pref", identity, "->", lang)
+
+    @room.on("participant_disconnected")
+    def on_left(participant):
+        recipient_prefs.pop(participant.identity, None)
 
     @room.on("track_subscribed")
     def on_track(track, publication, participant):
@@ -89,15 +144,14 @@ async def main():
                                 translations[tgt] = translate(text, src_lang, tgt)
                             except Exception as e:
                                 translations[tgt] = text
-                    payload = json.dumps({
+                    base = {
                         "type": "caption",
                         "speaker": participant.identity,
                         "source_lang": src_lang,
                         "original": text,
-                        "translations": translations,
                         "ts": time.time(),
-                    })
-                    await room.local_participant.publish_data(payload.encode(), reliable=True)
+                    }
+                    await deliver(room, base, text, translations, recipient_prefs)
                     print(participant.identity, src_lang, text)
 
     # keep running

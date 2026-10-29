@@ -15,8 +15,10 @@ android {
         versionCode = 1
         versionName = "1.0"
         vectorDrawables { useSupportLibrary = true }
-        buildConfigField("String", "BACKEND_URL", "\"http://10.0.2.2:3000\"")
-        buildConfigField("String", "AI_SERVICE_URL", "\"http://10.0.2.2:8000\"")
+        // 127.0.0.1 works on a USB-connected phone via `adb reverse tcp:3000 tcp:3000` (and on emulators with the same reverse).
+        // Override at runtime in Settings for LAN testing.
+        buildConfigField("String", "BACKEND_URL", "\"http://127.0.0.1:3000\"")
+        buildConfigField("String", "AI_SERVICE_URL", "\"http://127.0.0.1:8000\"")
     }
 
     signingConfigs {
@@ -28,6 +30,12 @@ android {
         }
     }
     buildTypes {
+        debug {
+            // `adb reverse tcp:3000 tcp:3000` (and 8000/7880/7881) makes the dev machine's
+            // services reachable on the phone's own localhost, even on a different network.
+            buildConfigField("String", "BACKEND_URL", "\"http://localhost:3000\"")
+            buildConfigField("String", "AI_SERVICE_URL", "\"http://localhost:8000\"")
+        }
         release {
             isMinifyEnabled = true
             signingConfig = signingConfigs.getByName("release").takeIf { it.storeFile != null }
@@ -74,7 +82,11 @@ dependencies {
     implementation("io.livekit:livekit-android-compose-components:2.4.2")
     implementation("androidx.media3:media3-exoplayer:1.4.1")
     implementation("androidx.media3:media3-common:1.4.1")
-    implementation("androidx.media3:media3-datasource:1.4.1")
+    implementation("com.google.mlkit:translate:17.0.3")
+    implementation("com.google.mlkit:text-recognition:16.0.1")
+    implementation("com.google.mlkit:text-recognition-devanagari:16.0.1")
+
 
     debugImplementation(libs.androidx.compose.ui.tooling)
+    testImplementation("junit:junit:4.13.2")
 }

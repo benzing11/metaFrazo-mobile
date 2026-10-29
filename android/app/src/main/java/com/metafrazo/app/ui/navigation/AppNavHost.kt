@@ -15,6 +15,7 @@ import com.metafrazo.app.ui.screens.transcripts.TranscriptScreen
 import com.metafrazo.app.ui.screens.recordings.PlayerScreen
 import com.metafrazo.app.ui.screens.recordings.RecordingsScreen
 import com.metafrazo.app.ui.screens.diagnostics.DiagnosticsScreen
+import com.metafrazo.app.ui.screens.settings.SettingsScreen
 import com.metafrazo.app.ui.screens.home.HomeScreen
 import com.metafrazo.app.ui.screens.meeting.JoinMeetingScreen
 import com.metafrazo.app.ui.screens.meeting.MeetingRoomScreen
@@ -30,6 +31,7 @@ fun AppNavHost(navController: NavHostController = rememberNavController(), start
                 onRecordings = { navController.navigate("recordings") },
                 onPermissions = { navController.navigate("permissions") },
                 onDiagnostics = { navController.navigate("diagnostics") },
+                onSettings = { navController.navigate("settings") },
             )
         }
         // Replace the lobby with the room so Back from the room never lands on a stale lobby.
@@ -67,8 +69,9 @@ fun AppNavHost(navController: NavHostController = rememberNavController(), start
             ChatScreen(meetingCode = code, onBack = { navController.popBackStack() })
         }
         composable("captions") { CaptionsScreen(onBack = { navController.popBackStack() }) }
-        composable("diagnostics") { DiagnosticsScreen() }
         composable("permissions") { PermissionsScreen(onBack = { navController.popBackStack() }) }
+        composable("diagnostics") { DiagnosticsScreen() }
+        composable("settings") { SettingsScreen(onBack = { navController.popBackStack() }) }
         composable("recordings") { RecordingsScreen(onBack = { navController.popBackStack() }, onPlay = { id -> navController.navigate("player/$id") }) }
         composable("player/{id}", arguments = listOf(navArgument("id") { type = NavType.StringType })) { bs ->
             val id = bs.arguments?.getString("id").orEmpty()

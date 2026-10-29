@@ -281,7 +281,6 @@ fun MeetingRoomScreen(
                     screenSharing = state.screenSharing,
                     onMic = vm::toggleMic,
                     onCamera = vm::toggleCamera,
-                    onSwitchCamera = vm::switchCamera,
                     onScreenShare = {
                         if (state.screenSharing) vm.stopScreenShare()
                         else screenLauncher.launch(projectionManager.createScreenCaptureIntent())
@@ -291,6 +290,12 @@ fun MeetingRoomScreen(
                     onMenu = { menuOpen = it },
                     menu = {
                         DropdownMenuItem(text = { Text("Live captions") }, leadingIcon = { Icon(Icons.Default.ClosedCaption, null) }, onClick = { menuOpen = false; onCaptions() })
+                        DropdownMenuItem(
+                            text = { Text("Switch camera") },
+                            leadingIcon = { Icon(Icons.Default.Cameraswitch, null) },
+                            enabled = state.cameraEnabled,
+                            onClick = { menuOpen = false; vm.switchCamera() },
+                        )
                         DropdownMenuItem(text = { Text("Chat") }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.Chat, null) }, onClick = { menuOpen = false; if (code.isNotEmpty()) onChat(code) })
                         DropdownMenuItem(text = { Text("Notes") }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.Notes, null) }, onClick = { menuOpen = false; if (code.isNotEmpty()) onNotes(code) })
                         DropdownMenuItem(text = { Text("Transcript") }, leadingIcon = { Icon(Icons.Default.Description, null) }, onClick = { menuOpen = false; if (code.isNotEmpty()) onTranscripts(code) })
@@ -515,7 +520,6 @@ private fun ControlBar(
     screenSharing: Boolean,
     onMic: () -> Unit,
     onCamera: () -> Unit,
-    onSwitchCamera: () -> Unit,
     onScreenShare: () -> Unit,
     onLeave: () -> Unit,
     menuOpen: Boolean,
@@ -524,7 +528,7 @@ private fun ControlBar(
 ) {
     LazyRow(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         item { RoundControl(
@@ -538,13 +542,6 @@ private fun ControlBar(
             description = if (cameraEnabled) "Turn camera off" else "Turn camera on",
             off = !cameraEnabled,
             onClick = onCamera,
-        ) }
-        item { RoundControl(
-            icon = Icons.Default.Cameraswitch,
-            description = "Switch camera",
-            off = false,
-            enabled = cameraEnabled,
-            onClick = onSwitchCamera,
         ) }
         item { RoundControl(
             icon = if (screenSharing) Icons.AutoMirrored.Filled.StopScreenShare else Icons.AutoMirrored.Filled.ScreenShare,

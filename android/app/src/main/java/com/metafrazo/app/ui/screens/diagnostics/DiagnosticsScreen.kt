@@ -16,6 +16,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.ui.unit.dp
 import com.metafrazo.app.BuildConfig
 import kotlinx.coroutines.Dispatchers
@@ -29,8 +32,9 @@ fun DiagnosticsScreen() {
     var backend by remember { mutableStateOf<String?>(null) }
     var ai by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(true) }
+    var tick by remember { mutableStateOf(0) }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(tick) {
         loading = true
         backend = fetchHealth("${BuildConfig.BACKEND_URL}/api/health")
         ai = fetchHealth("${BuildConfig.AI_SERVICE_URL}/health")
@@ -38,7 +42,7 @@ fun DiagnosticsScreen() {
     }
 
     Column(
-        modifier = Modifier.fillMaxSize().padding(16.dp),
+        modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("Diagnostics", style = MaterialTheme.typography.headlineLarge)
@@ -46,9 +50,7 @@ fun DiagnosticsScreen() {
         if (loading) CircularProgressIndicator() else Text(backend ?: "unknown")
         Text("AI service: ${BuildConfig.AI_SERVICE_URL}", style = MaterialTheme.typography.bodyMedium)
         if (!loading) Text(ai ?: "unknown")
-        Button(onClick = {
-            // re-trigger by recomposition hack: toggle loading
-        }) { Text("Refresh") }
+        Button(onClick = { tick++ }) { Text("Refresh") }
     }
 }
 

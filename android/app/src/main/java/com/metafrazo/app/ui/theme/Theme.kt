@@ -7,10 +7,8 @@ import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
 
-import androidx.compose.material3.expressive.MaterialExpressiveTheme
-import androidx.compose.material3.expressive.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.MaterialTheme
 
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun MetafrazoTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
@@ -25,8 +23,7 @@ fun MetafrazoTheme(
         darkTheme -> DarkColorScheme
         else -> LightColorScheme
     }
-    // Expressive theme wrapper
-    MaterialExpressiveTheme(
+    MaterialTheme(
         colorScheme = colorScheme,
         typography = AppTypography,
         shapes = AppShapes,
