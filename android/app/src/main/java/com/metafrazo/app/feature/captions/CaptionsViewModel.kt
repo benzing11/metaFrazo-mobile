@@ -191,6 +191,14 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
         _state.value = _state.value.copy(listening = false, partial = "")
     }
 
+    /** Surfaces a clear message when the user declines the microphone prompt. */
+    fun onMicPermissionDenied() {
+        _state.value = _state.value.copy(
+            listening = false,
+            error = "Microphone access is needed for live captions. Enable it in system settings.",
+        )
+    }
+
     private fun handleLocalTranscript(text: String) {
         val s = _state.value
         viewModelScope.launch {

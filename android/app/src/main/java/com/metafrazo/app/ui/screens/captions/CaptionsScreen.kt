@@ -1,6 +1,10 @@
 package com.metafrazo.app.ui.screens.captions
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.speech.tts.TextToSpeech
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -30,21 +34,37 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.metafrazo.app.feature.captions.CaptionsViewModel
 import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CaptionsScreen(onBack: () -> Unit, vm: CaptionsViewModel = viewModel()) {
+fun CaptionsScreen(
+    onBack: () -> Unit,
+    vm: CaptionsViewModel = viewModel(
+        factory = CaptionsViewModel.factory(LocalContext.current.applicationContext as android.app.Application),
+    ),
+) {
     val state by vm.state.collectAsState()
     val context = LocalContext.current
     val tts = remember { mutableStateOf<TextToSpeech?>(null) }
     val ttsInitialized = remember { mutableStateOf(false) }
     val ttsReady = remember { mutableStateOf(false) }
 
+    // Captions need the microphone for on-device dictation; request it the first time the screen opens.
+    val micPermission = remember { mutableStateOf(
+        ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
+    ) }
+    val micLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        micPermission.value = granted
+        if (!granted) vm.onMicPermissionDenied()
+    }
+
     LaunchedEffect(Unit) {
         vm.attachToRoom()
+        if (!micPermission.value) micLauncher.launch(Manifest.permission.RECORD_AUDIO)
         tts.value = TextToSpeech(context) { status -> ttsInitialized.value = status == TextToSpeech.SUCCESS }
     }
     // Re-validate voice availability whenever the engine is ready or the target language changes.
@@ -86,7 +106,13 @@ fun CaptionsScreen(onBack: () -> Unit, vm: CaptionsViewModel = viewModel()) {
                 FilterChip(selected = state.showOriginal, onClick = { vm.toggleOriginal() }, label = { Text("Original") })
             }
             Button(
-                onClick = { if (state.listening) vm.stopListening() else vm.startListening() },
+                onClick = {
+                    when {
+                        state.listening -> vm.stopListening()
+                        !micPermission.value -> micLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        else -> vm.startListening()
+                    }
+                },
                 enabled = state.spokenLang == state.targetLang || state.modelReady,
                 modifier = Modifier.fillMaxWidth(),
             ) { Text(if (state.listening) "Stop listening" else "Start listening") }
