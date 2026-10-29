@@ -9,6 +9,9 @@ import androidx.lifecycle.viewModelScope
 import com.metafrazo.app.core.speech.MeetingMicFeed
 import com.metafrazo.app.core.speech.SpeechRecognizerSource
 import com.metafrazo.app.core.speech.SpeechSynthesizer
+import com.metafrazo.app.core.speech.TranscriptSource
+import com.metafrazo.app.core.speech.WhisperAsrSource
+import com.metafrazo.app.core.network.Api
 import com.metafrazo.app.core.translate.DeviceTranslator
 import com.metafrazo.app.core.translate.TranslateResult
 import com.metafrazo.app.feature.meeting.MeetingViewModel
@@ -47,6 +50,12 @@ data class CaptionsUiState(
     val speakTranslations: Boolean = false,
     /** Read incoming chat messages aloud. */
     val speakChat: Boolean = false,
+    /** Which engine is producing local captions: "whisper", "device", or "" when idle. */
+    val engine: String = "",
+    /** True while Whisper hears speech or is transcribing a phrase (it has no word-by-word partials). */
+    val hearing: Boolean = false,
+    /** Names and terms passed to Whisper so they're spelled correctly. */
+    val hardWords: String = "",
 )
 
 class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
@@ -54,6 +63,8 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
         private const val FLUSH_INTERVAL_MS = 10_000L
         /** Short enough to feel instant, long enough to skip translating every recognizer tick. */
         private const val PARTIAL_DEBOUNCE_MS = 80L
+        /** Whisper reads at most ~224 prompt tokens; the service also truncates. */
+        private const val MAX_HARD_WORDS_CHARS = 400
 
         /** Outlives the ViewModel so the final flush on leave still completes. */
         private val uploadScope = kotlinx.coroutines.CoroutineScope(
@@ -70,7 +81,8 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
     val state: StateFlow<CaptionsUiState> = _state
 
     private var attached = false
-    private var speech: SpeechRecognizerSource? = null
+    private var speech: TranscriptSource? = null
+    private var startJob: kotlinx.coroutines.Job? = null
     private var partialJob: kotlinx.coroutines.Job? = null
     private val prefs = app.getSharedPreferences("metafrazo_captions", android.content.Context.MODE_PRIVATE)
     private var synthesizer: SpeechSynthesizer? = null
@@ -90,7 +102,14 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
             speakChat = prefs.getBoolean("speak_chat", false),
             targetLang = savedTarget ?: _state.value.targetLang,
             spokenLang = savedSpoken ?: _state.value.spokenLang,
+            hardWords = prefs.getString("hard_words", "").orEmpty(),
         )
+    }
+
+    fun setHardWords(words: String) {
+        val trimmed = words.take(MAX_HARD_WORDS_CHARS)
+        prefs.edit().putString("hard_words", trimmed).apply()
+        _state.value = _state.value.copy(hardWords = trimmed)
     }
 
     /** Lets other screens pause dictation while they play speech, so it is not re-transcribed. */
@@ -115,7 +134,9 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
     private fun speakAloud(item: CaptionItem) {
         val s = _state.value
         if (!s.speakTranslations || item.isLocal) return
-        val text = item.translations[s.targetLang] ?: item.original.takeIf { item.sourceLang == s.targetLang } ?: return
+        // Transcribe-only for same-language captions: never speak your own language back.
+        if (item.sourceLang == s.targetLang) return
+        val text = item.translations[s.targetLang] ?: return
         val synth = synthesizer ?: SpeechSynthesizer(
             context = getApplication(),
             onBusyChanged = { busy -> if (busy) speech?.pause() else speech?.resume() },
@@ -179,7 +200,9 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
     fun prepareModel() {
         val s = _state.value
         if (s.spokenLang == s.targetLang) {
-            _state.value = s.copy(modelReady = true, status = "")
+            // Same language: no translation model needed, captions are transcribe-only.
+            val label = DeviceTranslator.labels[s.targetLang] ?: s.targetLang.uppercase()
+            _state.value = s.copy(modelReady = true, status = "Captions ready ($label)", error = null)
             return
         }
         viewModelScope.launch {
@@ -253,8 +276,52 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Starts local captions. In a call with the AI service up, Whisper transcribes the meeting mic
+     * (much better on names and jargon); otherwise the phone's recognizer is used.
+     */
     fun startListening() {
-        if (_state.value.listening) return
+        if (_state.value.listening || startJob?.isActive == true) return
+        _state.value = _state.value.copy(listening = true, error = null)
+        startJob = viewModelScope.launch {
+            val aiUrl = Api.aiUrl
+            val inCall = MeetingViewModel.activeRoom != null
+            val whisperReady = inCall && kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                WhisperAsrSource.isReady(aiUrl)
+            }
+            if (!_state.value.listening) return@launch
+            if (whisperReady && startWhisper()) return@launch
+            startDeviceRecognizer()
+        }
+    }
+
+    private fun startWhisper(): Boolean {
+        val source = WhisperAsrSource(
+            micFeed = MeetingMicFeed { MeetingViewModel.activeRoom },
+            aiUrl = { Api.aiUrl },
+            language = _state.value.spokenLang,
+            prompt = { _state.value.hardWords },
+            onFinal = { text ->
+                _state.value = _state.value.copy(hearing = false)
+                handleLocalTranscript(text, livePreview = "")
+            },
+            onHearing = { hearing -> _state.value = _state.value.copy(hearing = hearing) },
+            onUnavailable = { reason ->
+                Log.w("CaptionsVM", "Whisper unavailable, switching to on-device: $reason")
+                speech?.stop()
+                speech = null
+                _state.value = _state.value.copy(hearing = false)
+                startDeviceRecognizer()
+            },
+        )
+        if (!source.start()) return false
+        speech = source
+        _state.value = _state.value.copy(engine = "whisper")
+        prepareModel()
+        return true
+    }
+
+    private fun startDeviceRecognizer() {
         val source = SpeechRecognizerSource(
             context = getApplication(),
             onPartial = { text -> onPartialTranscript(text) },
@@ -269,12 +336,12 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
             micFeed = MeetingMicFeed { MeetingViewModel.activeRoom },
         )
         if (!source.isAvailable) {
-            _state.value = _state.value.copy(error = "Speech recognition is not available on this device")
+            _state.value = _state.value.copy(error = "Speech recognition is not available on this device", listening = false, engine = "")
             return
         }
         speech = source
         source.start(localeTag(_state.value.spokenLang))
-        _state.value = _state.value.copy(listening = true, error = null)
+        _state.value = _state.value.copy(listening = true, engine = "device")
         prepareModel()
     }
 
@@ -306,10 +373,12 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
 
     fun stopListening() {
         partialJob?.cancel()
+        startJob?.cancel()
+        startJob = null
         flushTranscript()
         speech?.stop()
         speech = null
-        _state.value = _state.value.copy(listening = false, partial = "", partialTranslated = "")
+        _state.value = _state.value.copy(listening = false, partial = "", partialTranslated = "", engine = "", hearing = false)
     }
 
     /** Surfaces a clear message when the user declines the microphone prompt. */

@@ -32,7 +32,7 @@ class SpeechRecognizerSource(
     private val onError: (String) -> Unit,
     /** Supplies meeting mic audio during a call, when Android silences a second mic capture. */
     private val micFeed: MeetingMicFeed? = null,
-) {
+) : TranscriptSource {
     private val main = Handler(Looper.getMainLooper())
     private var recognizer: SpeechRecognizer? = null
     private var wantRunning = false
@@ -114,7 +114,7 @@ class SpeechRecognizerSource(
     }
 
     /** Stops listening without tearing down, e.g. while text-to-speech plays so it is not re-captured. */
-    fun pause() {
+    override fun pause() {
         if (!wantRunning || paused) return
         paused = true
         try {
@@ -123,7 +123,7 @@ class SpeechRecognizerSource(
         }
     }
 
-    fun resume() {
+    override fun resume() {
         if (!wantRunning || !paused) return
         paused = false
         listen()
@@ -240,7 +240,7 @@ class SpeechRecognizerSource(
         override fun onEvent(eventType: Int, params: Bundle?) {}
     }
 
-    fun stop() {
+    override fun stop() {
         wantRunning = false
         main.removeCallbacksAndMessages(null)
         micFeed?.stop()

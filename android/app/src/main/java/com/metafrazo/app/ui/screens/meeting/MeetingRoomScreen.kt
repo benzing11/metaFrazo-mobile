@@ -79,6 +79,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
@@ -352,6 +353,7 @@ fun MeetingRoomScreen(
                             partial = captionsState.partial,
                             partialTranslated = captionsState.partialTranslated,
                             listening = captionsState.listening,
+                            hearing = captionsState.hearing,
                             modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
                         )
                     }
@@ -425,6 +427,9 @@ fun MeetingRoomScreen(
                     onSpokenLang = { captionsVm.setSpokenLang(it) },
                     onTargetLang = { captionsVm.setTargetLang(it) },
                     status = captionsState.status,
+                    engine = captionsState.engine,
+                    hardWords = captionsState.hardWords,
+                    onHardWords = { captionsVm.setHardWords(it) },
                 )
             }
         }
@@ -753,6 +758,8 @@ private fun CaptionOverlay(
     partial: String,
     partialTranslated: String,
     listening: Boolean,
+    /** Whisper heard speech and is transcribing; it has no word-by-word partials to show. */
+    hearing: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val latest = captions.lastOrNull()
@@ -785,6 +792,8 @@ private fun CaptionOverlay(
         listening -> CaptionLine(id = "idle", speaker = "You", fromLang = spokenLang, main = "", sub = null, interim = true)
         else -> return
     }
+    // Live dot whenever speech is being heard, including Whisper's phrase-at-a-time mode.
+    val live = line.interim || hearing
 
     // The line before the current one, dimmed above it, so short sentences keep their context.
     val previous = when {
@@ -806,8 +815,8 @@ private fun CaptionOverlay(
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             CaptionHeader(
-                speaker = line.speaker,
-                live = line.interim,
+                speaker = if (hearing && !line.interim) "You" else line.speaker,
+                live = live,
                 fromLang = line.fromLang,
                 targetLang = targetLang,
             )
@@ -834,7 +843,7 @@ private fun CaptionOverlay(
                 label = "captionLine",
             ) { shown ->
                 if (shown.id == "idle") {
-                    ListeningDots()
+                    ListeningDots(if (hearing) "Transcribing" else "Listening")
                 } else {
                     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         Text(
@@ -916,17 +925,17 @@ private fun CaptionHeader(speaker: String, live: Boolean, fromLang: String, targ
 
 /** Three staggered dots shown while waiting for the first words. */
 @Composable
-private fun ListeningDots() {
+private fun ListeningDots(label: String) {
     val transition = rememberInfiniteTransition(label = "listeningDots")
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(5.dp),
         modifier = Modifier
             .height(26.dp)
-            .semantics { contentDescription = "Listening" },
+            .semantics { contentDescription = label },
     ) {
         Text(
-            "Listening",
+            label,
             style = MaterialTheme.typography.titleMedium,
             color = Color.White.copy(alpha = 0.7f),
         )
@@ -957,6 +966,9 @@ private fun CaptionLanguageSheet(
     onSpokenLang: (String) -> Unit,
     onTargetLang: (String) -> Unit,
     status: String,
+    engine: String,
+    hardWords: String,
+    onHardWords: (String) -> Unit,
 ) {
     Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 32.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Captions", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
@@ -980,6 +992,24 @@ private fun CaptionLanguageSheet(
                 )
             }
         }
+        Text("Names and terms", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        OutlinedTextField(
+            value = hardWords,
+            onValueChange = onHardWords,
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("e.g. MetaFrazo, Kubernetes, Priya") },
+            supportingText = { Text("Comma-separated. Helps the AI speech service spell these correctly.") },
+            minLines = 2,
+            maxLines = 4,
+        )
+        val engineText = when (engine) {
+            "whisper" -> "Speech engine: AI service (Whisper)"
+            "device" -> "Speech engine: on-device (AI service not reachable)"
+            else -> null
+        }
+        if (engineText != null) {
+            Text(engineText, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         if (status.isNotBlank()) {
             Text(status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -992,6 +1022,9 @@ private fun InviteSheet(code: String, onDone: () -> Unit) {
     val context = LocalContext.current
     val link = MeetingCode.joinLink(code)
     var copied by remember { mutableStateOf(false) }
+    val serverUrl = com.metafrazo.app.core.network.Api.backendUrl
+    val serverHost = runCatching { java.net.URI(serverUrl).host?.lowercase() }.getOrNull()
+    val onLoopback = serverHost == null || serverHost == "127.0.0.1" || serverHost == "localhost" || serverHost == "::1"
     Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 32.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("Invite people", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
         Text("Share this code. Others can enter it on the Join screen.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1003,6 +1036,15 @@ private fun InviteSheet(code: String, onDone: () -> Unit) {
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(vertical = 20.dp).fillMaxWidth(),
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+        }
+        if (onLoopback) {
+            Text(
+                "This phone is using $serverUrl, which only this phone can reach. Others will see " +
+                    "\"meeting not found\" until their Settings > Backend URL points to the same server " +
+                    "(for example http://<computer-LAN-IP>:3000).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
             )
         }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
@@ -1018,7 +1060,8 @@ private fun InviteSheet(code: String, onDone: () -> Unit) {
                 onClick = {
                     val send = Intent(Intent.ACTION_SEND).apply {
                         type = "text/plain"
-                        putExtra(Intent.EXTRA_TEXT, "Join my MetaFrazo meeting with code $code\n$link")
+                        val serverLine = if (onLoopback) "" else "\nServer (Settings > Backend URL): $serverUrl"
+                        putExtra(Intent.EXTRA_TEXT, "Join my MetaFrazo meeting with code $code\n$link$serverLine")
                     }
                     context.startActivity(Intent.createChooser(send, "Share meeting"))
                     onDone()
