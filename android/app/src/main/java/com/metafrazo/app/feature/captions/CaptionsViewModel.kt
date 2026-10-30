@@ -93,7 +93,8 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
     private val _state = MutableStateFlow(CaptionsUiState())
     val state: StateFlow<CaptionsUiState> = _state
 
-    private var attached = false
+    private var attachedRoom: io.livekit.android.room.Room? = null
+    private var roomJob: kotlinx.coroutines.Job? = null
     private var speech: TranscriptSource? = null
     private var startJob: kotlinx.coroutines.Job? = null
     private var partialJob: kotlinx.coroutines.Job? = null
@@ -275,11 +276,15 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Receives captions published by other participants. */
     fun attachToRoom() {
-        if (attached) return
         val room = MeetingViewModel.activeRoom ?: return
-        attached = true
+        // This ViewModel is Activity-scoped and outlives a single meeting, so re-attach whenever
+        // the room instance changes; otherwise a second call never receives captions.
+        if (attachedRoom === room && roomJob?.isActive == true) return
+        roomJob?.cancel()
+        attachedRoom = room
+        recipientPrefs.clear()
         announcePreference()
-        viewModelScope.launch {
+        roomJob = viewModelScope.launch {
             room.events.events.collect { ev ->
                 if (ev is io.livekit.android.events.RoomEvent.ParticipantDisconnected) {
                     ev.participant.identity?.value?.let { recipientPrefs.remove(it) }

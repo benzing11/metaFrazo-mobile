@@ -174,6 +174,9 @@ class ScreenTranslator(
 
         var translated = 0
         var failed = 0
+        // A slide usually stays on screen across several sampled frames; reuse the previous
+        // translation for identical blocks instead of re-running ML Kit every 2.5s.
+        manager.useLanguagePair(sourceLang, targetLang)
         val regions = text.textBlocks.mapNotNull { block ->
             val box = block.boundingBox ?: return@mapNotNull null
             val original = block.text.replace('\n', ' ').trim()
@@ -181,13 +184,19 @@ class ScreenTranslator(
             val shown = if (sourceLang == targetLang) {
                 original
             } else {
-                when (val r = DeviceTranslator.translateResult(original, sourceLang, targetLang)) {
-                    is TranslateResult.Translated -> { translated++; r.text }
-                    is TranslateResult.SameLanguage -> r.text
-                    is TranslateResult.Unsupported -> { failed++; r.text }
-                    is TranslateResult.Failed -> {
-                        Log.w("ScreenTranslator", "translate failed: ${r.reason}")
-                        failed++; r.text
+                manager.cached(original)?.also { translated++ } ?: run {
+                    when (val r = DeviceTranslator.translateResult(original, sourceLang, targetLang)) {
+                        is TranslateResult.Translated -> {
+                            translated++
+                            manager.remember(original, r.text)
+                            r.text
+                        }
+                        is TranslateResult.SameLanguage -> r.text
+                        is TranslateResult.Unsupported -> { failed++; r.text }
+                        is TranslateResult.Failed -> {
+                            Log.w("ScreenTranslator", "translate failed: ${r.reason}")
+                            failed++; r.text
+                        }
                     }
                 }
             }
