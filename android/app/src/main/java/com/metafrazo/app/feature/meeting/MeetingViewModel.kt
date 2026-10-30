@@ -243,6 +243,24 @@ class MeetingViewModel(private val app: Application) : ViewModel() {
         }
     }
 
+    /**
+     * Mutes or restores the published microphone for voice-replacement captions, without
+     * touching the user's own mic toggle preference. When muted, other participants no longer
+     * hear the raw voice; captions still flow and each listener's device speaks the translation.
+     * Returns true when the room applied the change.
+     */
+    fun setMeetingMicMuted(muted: Boolean): Boolean {
+        val r = room ?: return false
+        val wantEnabled = !muted
+        // Never un-mute if the user themselves muted the mic.
+        if (wantEnabled && !_state.value.micEnabled) return false
+        viewModelScope.launch {
+            runCatching { r.localParticipant.setMicrophoneEnabled(wantEnabled) }
+                .onFailure { Log.w("MeetingVM", "voice-replacement mic toggle failed", it) }
+        }
+        return true
+    }
+
     fun toggleCamera() {
         val enabled = !_state.value.cameraEnabled
         if (enabled && !granted(Manifest.permission.CAMERA)) {

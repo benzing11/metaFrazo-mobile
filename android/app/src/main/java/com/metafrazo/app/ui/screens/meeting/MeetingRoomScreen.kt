@@ -380,6 +380,9 @@ fun MeetingRoomScreen(
                     cameraEnabled = state.cameraEnabled,
                     screenSharing = state.screenSharing,
                     captionsOn = captionsOn,
+                    screenShareActive = screenShare != null,
+                    translateScreen = translateScreen,
+                    onToggleTranslate = { translateScreen = !translateScreen },
                     onCaptions = { if (captionsOn) disableCaptions() else enableCaptions() },
                     onMic = vm::toggleMic,
                     onCamera = vm::toggleCamera,
@@ -682,6 +685,9 @@ private fun ControlBar(
     cameraEnabled: Boolean,
     screenSharing: Boolean,
     captionsOn: Boolean,
+    screenShareActive: Boolean,
+    translateScreen: Boolean,
+    onToggleTranslate: () -> Unit,
     onCaptions: () -> Unit,
     onMic: () -> Unit,
     onCamera: () -> Unit,
@@ -721,6 +727,15 @@ private fun ControlBar(
             off = false,
             highlighted = screenSharing,
             onClick = onScreenShare,
+        ) }
+        // One-tap slide translation; enabled only while a screen share is on stage.
+        item { RoundControl(
+            icon = Icons.Default.Translate,
+            description = if (translateScreen) "Turn off slide translation" else "Translate shared screen",
+            off = false,
+            enabled = screenShareActive,
+            highlighted = translateScreen,
+            onClick = onToggleTranslate,
         ) }
         item { Box {
             RoundControl(icon = Icons.Default.MoreVert, description = "More options", off = false, onClick = { onMenu(true) })

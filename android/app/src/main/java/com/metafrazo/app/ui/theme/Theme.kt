@@ -12,7 +12,8 @@ import androidx.compose.material3.MaterialTheme
 @Composable
 fun MetafrazoTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = true,
+    // Brand palette by default; dynamic color bypasses it entirely on Android 12+.
+    dynamicColor: Boolean = false,
     content: @Composable () -> Unit,
 ) {
     val colorScheme = when {

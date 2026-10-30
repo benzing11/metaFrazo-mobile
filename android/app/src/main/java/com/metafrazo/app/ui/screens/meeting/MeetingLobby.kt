@@ -59,6 +59,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
@@ -314,11 +315,13 @@ private fun DeviceToggle(
         checked = !checked,
         onCheckedChange = { onToggle() },
         modifier = Modifier.size(56.dp),
+        // Off state is neutral (white) to match the in-call RoundControl; red is reserved
+        // for destructive actions like leaving the call.
         colors = IconButtonDefaults.filledIconToggleButtonColors(
-            containerColor = MaterialTheme.colorScheme.surface,
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
             contentColor = MaterialTheme.colorScheme.onSurface,
-            checkedContainerColor = MaterialTheme.colorScheme.error,
-            checkedContentColor = MaterialTheme.colorScheme.onError,
+            checkedContainerColor = Color.White,
+            checkedContentColor = Color(0xFF0E1015),
         ),
     ) { if (checked) onIcon() else offIcon() }
 }

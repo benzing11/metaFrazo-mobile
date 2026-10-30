@@ -48,6 +48,13 @@ data class CaptionsUiState(
     val modelReady: Boolean = false,
     /** Read remote captions aloud in [targetLang]. */
     val speakTranslations: Boolean = false,
+    /**
+     * Voice-replacement mode: mute the published mic so others hear the spoken translation
+     * (their device speaks the caption) instead of the raw voice. Requires captions to be on.
+     */
+    val voiceReplacement: Boolean = false,
+    /** True while voice replacement has actually muted the meeting mic. */
+    val micMutedForReplacement: Boolean = false,
     /** Read incoming chat messages aloud. */
     val speakChat: Boolean = false,
     /** Which engine is producing local captions: "whisper", "device", or "" when idle. */
@@ -58,6 +65,8 @@ data class CaptionsUiState(
     val hardWords: String = "",
     /** Let Whisper auto-detect the language per phrase so mixed Tamil/Hindi + English stays intact. */
     val autoDetectLang: Boolean = true,
+    /** True when auto-detect is on but the phone recognizer can't switch languages (pre-Android 14 / OEM). */
+    val autoDetectUnsupported: Boolean = false,
 )
 
 class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
@@ -67,6 +76,8 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
         private const val PARTIAL_DEBOUNCE_MS = 40L
         /** Whisper reads at most ~224 prompt tokens; the service also truncates. */
         private const val MAX_HARD_WORDS_CHARS = 400
+        /** The only languages auto-detect considers: English, Tamil, Hindi. */
+        private val AUTO_DETECT_LANGS = listOf("en", "ta", "hi")
 
         /** Outlives the ViewModel so the final flush on leave still completes. */
         private val uploadScope = kotlinx.coroutines.CoroutineScope(
@@ -103,6 +114,7 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
         // choice still sticks once the user turns it off.
         _state.value = _state.value.copy(
             speakTranslations = prefs.getBoolean("speak_translations", true),
+            voiceReplacement = prefs.getBoolean("voice_replacement", false),
             speakChat = prefs.getBoolean("speak_chat", false),
             targetLang = savedTarget ?: _state.value.targetLang,
             spokenLang = savedSpoken ?: _state.value.spokenLang,
@@ -138,6 +150,41 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
         if (!enabled) {
             synthesizer?.stop()
             speech?.resume()
+        }
+    }
+
+    /**
+     * Voice replacement: when on and captions are running, mutes the published meeting mic so
+     * other participants hear only the spoken translation (delivered as a caption their device
+     * reads aloud) rather than the raw voice. Turning it off restores the mic.
+     */
+    fun setVoiceReplacement(enabled: Boolean) {
+        prefs.edit().putBoolean("voice_replacement", enabled).apply()
+        _state.value = _state.value.copy(voiceReplacement = enabled)
+        applyVoiceReplacement()
+    }
+
+    /**
+     * Mutes or restores the meeting mic to match the current voice-replacement + listening state.
+     * The mic is muted only while both voice replacement is on and captions are actively listening,
+     * so leaving the captions screen or stopping dictation brings the raw voice back.
+     */
+    private fun applyVoiceReplacement() {
+        val s = _state.value
+        val room = MeetingViewModel.activeRoom
+        val shouldMute = VoiceReplacementPolicy.shouldMuteMic(s.voiceReplacement, s.listening, room != null)
+        if (room == null) {
+            if (s.micMutedForReplacement) _state.value = s.copy(micMutedForReplacement = false)
+            return
+        }
+        if (shouldMute == s.micMutedForReplacement) return
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+            try {
+                room.localParticipant.setMicrophoneEnabled(!shouldMute)
+                _state.value = _state.value.copy(micMutedForReplacement = shouldMute)
+            } catch (e: Exception) {
+                Log.w("CaptionsVM", "voice replacement mic toggle failed", e)
+            }
         }
     }
 
@@ -274,22 +321,52 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
                             t.keys().forEach { k -> trans[k] = t.optString(k) }
                         }
                         val target = _state.value.targetLang
-                        // Translate on this device when the sender did not include our language.
-                        if (!trans.containsKey(target) && sourceLang != target) {
-                            val err = DeviceTranslator.prepare(sourceLang, target)
-                            if (err == null) {
-                                trans[target] = DeviceTranslator.translate(original, sourceLang, target)
-                            }
+                        // Make sure the reader always has something in their own language. The
+                        // sender's per-recipient routing may send only another participant's
+                        // language, so fall back to the original here until we translate it.
+                        if (!trans.containsKey(target)) {
+                            trans[target] = original
                         }
+                        val speaker = json.optString("speaker", "Participant")
+                        val ts = json.optDouble("ts", System.currentTimeMillis() / 1000.0)
                         val remote = CaptionItem(
-                            speaker = json.optString("speaker", "Participant"),
+                            speaker = speaker,
                             sourceLang = sourceLang,
                             original = original,
                             translations = trans,
-                            ts = json.optDouble("ts", System.currentTimeMillis() / 1000.0),
+                            ts = ts,
                         )
+                        // Show the caption right away (original as placeholder); don't block the
+                        // event collector on a model download.
                         addCaption(remote)
                         speakAloud(remote)
+
+                        // Translate into the reader's language off the collector, then update the
+                        // caption in place. Earlier this ran inline and silently showed the raw
+                        // foreign text whenever the model wasn't downloaded yet.
+                        val needsTranslation = sourceLang != target &&
+                            trans[target] == original && original.isNotBlank()
+                        if (needsTranslation) {
+                            viewModelScope.launch {
+                                val prepErr = DeviceTranslator.prepare(sourceLang, target)
+                                if (prepErr != null) {
+                                    Log.w("CaptionsVM", "remote caption translate prep failed: $prepErr")
+                                    return@launch
+                                }
+                                when (val r = DeviceTranslator.translateResult(original, sourceLang, target)) {
+                                    is TranslateResult.Translated -> {
+                                        val updated = remote.copy(
+                                            translations = remote.translations + (target to r.text),
+                                        )
+                                        addCaption(updated)
+                                        speakAloud(updated)
+                                    }
+                                    is TranslateResult.Failed ->
+                                        Log.w("CaptionsVM", "remote caption translate failed: ${r.reason}")
+                                    else -> {}
+                                }
+                            }
+                        }
                     } catch (e: Exception) {
                         Log.w("CaptionsVM", "bad caption payload", e)
                     }
@@ -308,12 +385,19 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
         startJob = viewModelScope.launch {
             val aiUrl = Api.aiUrl
             val inCall = MeetingViewModel.activeRoom != null
-            val whisperReady = inCall && kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                WhisperAsrSource.isReady(aiUrl)
-            }
+            // Voice replacement mutes the published mic, so Whisper can't tap the meeting track.
+            // Use the device recognizer, which reads the phone's own mic and is unaffected by the mute.
+            val whisperReady = inCall && !_state.value.voiceReplacement &&
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    WhisperAsrSource.isReady(aiUrl)
+                }
             if (!_state.value.listening) return@launch
-            if (whisperReady && startWhisper()) return@launch
+            if (whisperReady && startWhisper()) {
+                applyVoiceReplacement()
+                return@launch
+            }
             startDeviceRecognizer()
+            applyVoiceReplacement()
         }
     }
 
@@ -339,7 +423,8 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
         )
         if (!source.start()) return false
         speech = source
-        _state.value = _state.value.copy(engine = "whisper")
+        // Whisper does true per-phrase detection, so the device-recognizer warning never applies here.
+        _state.value = _state.value.copy(engine = "whisper", autoDetectUnsupported = false)
         prepareModel()
         return true
     }
@@ -363,8 +448,20 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         speech = source
-        source.start(localeTag(_state.value.spokenLang))
-        _state.value = _state.value.copy(listening = true, engine = "device")
+        // When auto-detect is on, let the recognizer switch among the three supported
+        // languages (English/Tamil/Hindi) on Android 14+; otherwise it stays on the spoken one.
+        val allowed = if (_state.value.autoDetectLang) {
+            AUTO_DETECT_LANGS.map(::localeTag)
+        } else {
+            emptyList()
+        }
+        source.start(localeTag(_state.value.spokenLang), allowed)
+        _state.value = _state.value.copy(
+            listening = true,
+            engine = "device",
+            // Warn only when auto-detect was asked for but this recognizer can't switch languages.
+            autoDetectUnsupported = _state.value.autoDetectLang && source.autoDetectUnsupported,
+        )
         prepareModel()
     }
 
@@ -402,6 +499,8 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
         speech?.stop()
         speech = null
         _state.value = _state.value.copy(listening = false, partial = "", partialTranslated = "", engine = "", hearing = false)
+        // Dictation stopped: bring the raw mic back if voice replacement had muted it.
+        applyVoiceReplacement()
     }
 
     /** Surfaces a clear message when the user declines the microphone prompt. */

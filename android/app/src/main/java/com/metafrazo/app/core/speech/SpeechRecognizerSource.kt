@@ -66,7 +66,18 @@ class SpeechRecognizerSource(
         }
     }
 
-    fun start(languageTag: String) {
+    /** BCP-47 tags the recognizer may switch between when auto-detect is on (empty = off). */
+    private var allowedLanguageTags: List<String> = emptyList()
+
+    /**
+     * True when auto-detect was requested but this device can't honor it: the language-switch
+     * extras exist only on Android 14+, and even there OEM support varies. When false-with-tags
+     * the recognizer stays pinned to the single spoken language, so the UI can warn the user.
+     */
+    val autoDetectUnsupported: Boolean
+        get() = allowedLanguageTags.isNotEmpty() && Build.VERSION.SDK_INT < 34
+
+    fun start(languageTag: String, allowedLanguageTags: List<String> = emptyList()) {
         if (!isAvailable) {
             onError("No speech recognizer is available. Install or enable Google Speech Services.")
             return
@@ -74,6 +85,7 @@ class SpeechRecognizerSource(
         wantRunning = true
         paused = false
         activeTag = languageTag
+        this.allowedLanguageTags = allowedLanguageTags
         consecutiveErrors = 0
         ensureRecognizer()
         Log.i(TAG, "start lang=$languageTag onDevice=$usingOnDevice")
@@ -142,6 +154,16 @@ class SpeechRecognizerSource(
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1000L)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 700L)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 500L)
+            // Auto-detect: on Android 14+ ask the recognizer to switch among the allowed
+            // languages (English/Tamil/Hindi) instead of being pinned to one. OEM support
+            // varies; where it's missing the recognizer simply uses activeTag.
+            if (allowedLanguageTags.isNotEmpty() && Build.VERSION.SDK_INT >= 34) {
+                putExtra(EXTRA_ENABLE_LANGUAGE_SWITCH, LANGUAGE_SWITCH_AGGRESSIVE)
+                putExtra(
+                    EXTRA_LANGUAGE_SWITCH_ALLOWED_LANGUAGES,
+                    ArrayList(allowedLanguageTags),
+                )
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 micFeed?.openSession()?.let { pipe ->
                     putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, pipe)
@@ -261,5 +283,11 @@ class SpeechRecognizerSource(
         // kept as literals so the file compiles against any compileSdk.
         const val ERROR_LANGUAGE_NOT_SUPPORTED = 12
         const val ERROR_LANGUAGE_UNAVAILABLE = 13
+        // RecognizerIntent language-switch extras (API 34+), kept as literals so the file
+        // compiles against any compileSdk. OEM support varies; absence is a harmless no-op.
+        const val EXTRA_ENABLE_LANGUAGE_SWITCH = "android.speech.extra.ENABLE_LANGUAGE_SWITCH"
+        const val EXTRA_LANGUAGE_SWITCH_ALLOWED_LANGUAGES =
+            "android.speech.extra.LANGUAGE_SWITCH_ALLOWED_LANGUAGES"
+        const val LANGUAGE_SWITCH_AGGRESSIVE = "aggressive"
     }
 }

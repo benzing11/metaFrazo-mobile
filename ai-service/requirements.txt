@@ -10,7 +10,6 @@ torch==2.15.0+cpu
 sentencepiece==0.2.2
 sacremoses==0.2.0
 
-# OCR (requires tesseract binary + language data)
-# pytesseract==0.3.13
-# opencv-python==4.10.0.84
-# Pillow==10.4.0
+# OCR (requires tesseract binary + language data; see README for install)
+pytesseract==0.3.13
+Pillow==10.4.0

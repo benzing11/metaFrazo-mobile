@@ -15,9 +15,12 @@ import kotlin.math.sqrt
 class UtteranceSegmenter(
     sampleRate: Int = 16_000,
     private val frameMs: Int = 20,
-    private val endSilenceMs: Int = 500,
-    private val maxUtteranceMs: Int = 10_000,
-    private val minSpeechMs: Int = 300,
+    // Shorter end-silence cuts a phrase sooner after the speaker pauses, so captions
+    // appear almost immediately instead of waiting out a long trailing gap.
+    private val endSilenceMs: Int = 350,
+    // Cap phrases at ~6 s so a long, unbroken sentence still flushes to the screen quickly.
+    private val maxUtteranceMs: Int = 6_000,
+    private val minSpeechMs: Int = 200,
     preRollMs: Int = 300,
     private val minThreshold: Double = 400.0,
 ) {

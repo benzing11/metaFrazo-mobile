@@ -28,6 +28,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Button
@@ -132,6 +134,63 @@ fun CaptionsScreen(
                 }
             }
 
+            // Auto-detect toggle: let Whisper pick the spoken language per phrase, limited to
+            // English, Tamil, and Hindi, so mixed-language speech transcribes correctly.
+            Surface(
+                tonalElevation = 2.dp,
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Filled.Mic, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Column(Modifier.weight(1f)) {
+                        Text("Auto-detect language", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "Detect English, Tamil, or Hindi per phrase (best for mixed speech)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = state.autoDetectLang, onCheckedChange = { vm.setAutoDetectLang(it) })
+                }
+            }
+
+            // Voice replacement: mute the raw mic so others hear only the spoken translation.
+            Surface(
+                tonalElevation = 2.dp,
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        if (state.micMutedForReplacement) Icons.Filled.MicOff else Icons.Filled.RecordVoiceOver,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                    Column(Modifier.weight(1f)) {
+                        Text("Replace my voice", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            if (state.micMutedForReplacement) {
+                                "Mic muted — others hear the spoken translation"
+                            } else {
+                                "Mute my mic; others hear only the translated speech while captions run"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = state.voiceReplacement, onCheckedChange = { vm.setVoiceReplacement(it) })
+                }
+            }
+
             ListenButton(
                 listening = state.listening,
                 enabled = state.spokenLang == state.targetLang || state.modelReady,
@@ -224,8 +283,12 @@ private fun StatusLine(state: com.metafrazo.app.feature.captions.CaptionsUiState
         state.listening -> {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 LiveDot(active = state.hearing)
+                val langLabel = if (state.autoDetectLang) "EN/TA/HI" else state.spokenLang.uppercase()
                 Text(
-                    if (state.hearing) "Hearing speech…" else "Listening in ${state.spokenLang.uppercase()}…",
+                    when {
+                        state.hearing -> "Transcribing…"
+                        else -> "Listening ($langLabel)…"
+                    },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.primary,
                     fontWeight = FontWeight.Medium,

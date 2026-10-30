@@ -1,10 +1,14 @@
 package com.metafrazo.app.core.screen
 
+import android.graphics.ImageFormat
+import android.graphics.Rect
+import android.graphics.YuvImage
 import android.util.Log
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.devanagari.DevanagariTextRecognizerOptions
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import com.metafrazo.app.core.network.Api
 import com.metafrazo.app.core.translate.DeviceTranslator
 import com.metafrazo.app.core.translate.TranslateResult
 import com.metafrazo.app.ui.components.OverlayRegion
@@ -16,8 +20,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import livekit.org.webrtc.VideoFrame
 import livekit.org.webrtc.VideoSink
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 
@@ -90,11 +97,17 @@ class ScreenTranslator(
         val generation = manager.nextGeneration()
         job = scope.launch(Dispatchers.Default) {
             try {
-                val image = InputImage.fromByteArray(nv21, width, height, rotation, InputImage.IMAGE_FORMAT_NV21)
                 val rotated = rotation == 90 || rotation == 270
                 val w = (if (rotated) height else width).toFloat()
                 val h = (if (rotated) width else height).toFloat()
-                val result = recognize(image, w, h)
+                // On-device ML Kit reads Latin and Devanagari; any other script is routed to the
+                // backend's Tesseract OCR, which needs the raw frame as a JPEG.
+                val result = if (sourceLang in onDeviceLangs) {
+                    val image = InputImage.fromByteArray(nv21, width, height, rotation, InputImage.IMAGE_FORMAT_NV21)
+                    recognizeOnDevice(image, w, h)
+                } else {
+                    recognizeOnServer(nv21, width, height)
+                }
                 if (manager.isStale(generation)) return@launch
                 _state.value = State(
                     regions = result.regions,
@@ -114,21 +127,17 @@ class ScreenTranslator(
 
     private data class Pass(val regions: List<OverlayRegion>, val status: String)
 
-    private suspend fun recognize(image: InputImage, w: Float, h: Float): Pass {
+    /** Languages ML Kit can OCR on-device (Latin and Devanagari scripts). */
+    private val onDeviceLangs = setOf(
+        "hi", "mr", "ne", "sa",                               // Devanagari
+        "en", "es", "fr", "de", "it", "pt", "nl", "id", "ms", "tr", "vi", // Latin
+    )
+
+    private suspend fun recognizeOnDevice(image: InputImage, w: Float, h: Float): Pass {
         // ML Kit on-device OCR only ships Latin and Devanagari recognizers. Pick Devanagari
-        // for Devanagari-script languages; use Latin for Latin-script languages. Everything
-        // else (Tamil, Telugu, Kannada, Bengali, Gujarati, Urdu, Arabic, Chinese …) has no
-        // on-device recognizer, so report that honestly instead of silently returning nothing.
+        // for Devanagari-script languages; use Latin for Latin-script languages.
         val devanagariLangs = setOf("hi", "mr", "ne", "sa")
-        val latinLangs = setOf("en", "es", "fr", "de", "it", "pt", "nl", "id", "ms", "tr", "vi")
-        val client = when (sourceLang) {
-            in devanagariLangs -> devanagari
-            in latinLangs -> latin
-            else -> {
-                val label = DeviceTranslator.labels[sourceLang] ?: sourceLang.uppercase()
-                return Pass(emptyList(), "On-device screen OCR supports Latin and Devanagari text only; $label isn't available")
-            }
-        }
+        val client = if (sourceLang in devanagariLangs) devanagari else latin
 
         val text = suspendCancellableCoroutine<com.google.mlkit.vision.text.Text?> { cont ->
             client.process(image)
@@ -203,6 +212,67 @@ class ScreenTranslator(
     }
 
     private fun plural(n: Int) = if (n == 1) "" else "s"
+
+    /**
+     * Sends the frame to the backend's Tesseract OCR + translation endpoint for scripts ML Kit
+     * can't read on-device (Tamil, Telugu, Kannada, Bengali, Gujarati, Urdu, Arabic, Chinese).
+     * The backend returns regions with normalized coordinates and a translated string.
+     */
+    private suspend fun recognizeOnServer(nv21: ByteArray, width: Int, height: Int): Pass {
+        val jpeg = try {
+            nv21ToJpeg(nv21, width, height)
+        } catch (e: Exception) {
+            Log.w("ScreenTranslator", "jpeg encode failed", e)
+            return Pass(emptyList(), "Couldn't prepare the shared screen for translation")
+        }
+        val (code, body) = withContext(Dispatchers.IO) {
+            Api.postMultipart(
+                path = "/api/screen/analyze",
+                fileField = "file",
+                fileName = "frame.jpg",
+                fileBytes = jpeg,
+                fileContentType = "image/jpeg",
+                fields = mapOf("source_lang" to sourceLang, "target_lang" to targetLang),
+            )
+        }
+        if (code == -1) {
+            return Pass(emptyList(), "Can't reach the translation service for this script")
+        }
+        if (code !in 200..299) {
+            Log.w("ScreenTranslator", "server OCR http $code: $body")
+            return Pass(emptyList(), "Screen translation service error ($code)")
+        }
+        val regions = try {
+            val arr = JSONObject(body).optJSONArray("regions") ?: return Pass(emptyList(), "No text found on the shared screen")
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val original = o.optString("text").replace('\n', ' ').trim()
+                if (original.length < 2) return@mapNotNull null
+                OverlayRegion(
+                    text = original,
+                    translated = o.optString("translated").ifBlank { original },
+                    x = o.optDouble("x", 0.0).toFloat(),
+                    y = o.optDouble("y", 0.0).toFloat(),
+                    w = o.optDouble("w", 0.0).toFloat(),
+                    h = o.optDouble("h", 0.0).toFloat(),
+                )
+            }
+        } catch (e: Exception) {
+            Log.w("ScreenTranslator", "server OCR parse failed", e)
+            return Pass(emptyList(), "Couldn't read the translation response")
+        }
+        val status = if (regions.isEmpty()) "No text found on the shared screen"
+                     else "Translated ${regions.size} text block${plural(regions.size)} (server)"
+        return Pass(regions, status)
+    }
+
+    /** Encodes NV21 bytes to a JPEG byte array using the platform [YuvImage] encoder. */
+    private fun nv21ToJpeg(nv21: ByteArray, width: Int, height: Int): ByteArray {
+        val yuv = YuvImage(nv21, ImageFormat.NV21, width, height, null)
+        val out = ByteArrayOutputStream()
+        yuv.compressToJpeg(Rect(0, 0, width, height), 80, out)
+        return out.toByteArray()
+    }
 
     fun close() {
         detach()

@@ -108,6 +108,52 @@ object Api {
     fun post(path: String, json: String): Pair<Int, String> = request("POST", path, json)
     fun get(path: String): Pair<Int, String> = request("GET", path)
 
+    /**
+     * Uploads a single binary part plus string form fields as multipart/form-data.
+     * Used for server-side screen OCR (sending a JPEG frame to /api/screen/analyze).
+     * Never throws: failures return code -1 with a readable message.
+     */
+    fun postMultipart(
+        path: String,
+        fileField: String,
+        fileName: String,
+        fileBytes: ByteArray,
+        fileContentType: String,
+        fields: Map<String, String> = emptyMap(),
+    ): Pair<Int, String> = try {
+        val boundary = "----metafrazo${System.nanoTime()}"
+        val conn = URL(backendUrl + path).openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.connectTimeout = 10000
+        conn.readTimeout = 15000
+        conn.doOutput = true
+        conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+        authHeaders().forEach { (k, v) -> conn.setRequestProperty(k, v) }
+        val crlf = "\r\n"
+        val dash = "--"
+        conn.outputStream.use { out ->
+            for ((k, v) in fields) {
+                out.write(("$dash$boundary$crlf").toByteArray())
+                out.write(("Content-Disposition: form-data; name=\"$k\"$crlf$crlf").toByteArray())
+                out.write(v.toByteArray())
+                out.write(crlf.toByteArray())
+            }
+            out.write(("$dash$boundary$crlf").toByteArray())
+            out.write(("Content-Disposition: form-data; name=\"$fileField\"; filename=\"$fileName\"$crlf").toByteArray())
+            out.write(("Content-Type: $fileContentType$crlf$crlf").toByteArray())
+            out.write(fileBytes)
+            out.write(crlf.toByteArray())
+            out.write(("$dash$boundary$dash$crlf").toByteArray())
+        }
+        val code = conn.responseCode
+        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+        val text = stream?.bufferedReader()?.readText() ?: ""
+        conn.disconnect()
+        code to text
+    } catch (e: Exception) {
+        -1 to reachabilityError(e)
+    }
+
     /** Quick health probe against the current backend. Returns true on HTTP 2xx. */
     fun checkBackend(): Boolean = try {
         val (code, _) = doRequest("GET", "/api/health", null)

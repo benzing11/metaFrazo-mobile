@@ -129,8 +129,40 @@ async def qa(req: QaRequest):
     return QaResponse(**r)
 
 
+# Maps the app's two-letter language codes to Tesseract traineddata names. Each target
+# script is paired with English so mixed-language slides still read cleanly. Install the
+# matching language packs for whatever you expect to OCR (see docs/setup).
+OCR_TESS_LANG = {
+    "en": "eng",
+    "hi": "hin+eng",
+    "mr": "mar+eng",
+    "ta": "tam+eng",
+    "te": "tel+eng",
+    "kn": "kan+eng",
+    "bn": "ben+eng",
+    "gu": "guj+eng",
+    "ur": "urd+eng",
+    "es": "spa+eng",
+    "fr": "fra+eng",
+    "de": "deu+eng",
+    "ar": "ara+eng",
+    "zh": "chi_sim+eng",
+}
+
+
+def _resolve_tesseract_lang(language: str) -> str:
+    """Normalize an incoming language code to a Tesseract lang string, defaulting to English."""
+    if not language:
+        return "eng"
+    code = language.lower()
+    if code in OCR_TESS_LANG:
+        return OCR_TESS_LANG[code]
+    # Already a Tesseract code (e.g. "tam+eng") or unknown: pass through, else English.
+    return language if language.replace("+", "").isalpha() else "eng"
+
+
 @app.post("/ocr", response_model=OcrResponse)
-async def ocr(file: UploadFile = File(...), language: str = Form("eng")):
+async def ocr(file: UploadFile = File(...), language: str = Form("en")):
     if not _check_module("pytesseract"):
         return OcrResponse(language=language, regions=[], full_text="")
     try:
@@ -138,15 +170,20 @@ async def ocr(file: UploadFile = File(...), language: str = Form("eng")):
         from PIL import Image
         import pytesseract
         import os
-        tess = os.environ.get("TESSERACT_CMD") or r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-        if os.path.exists(tess):
+        # Cross-platform: prefer an explicit override, otherwise rely on PATH (Linux/macOS
+        # install tesseract to /usr/bin or /opt/homebrew/bin, both already on PATH).
+        tess = os.environ.get("TESSERACT_CMD") or shutil.which("tesseract")
+        if tess and os.path.exists(tess):
             pytesseract.pytesseract.tesseract_cmd = tess
-        os.environ.setdefault("TESSDATA_PREFIX", os.environ.get("TESSDATA_PREFIX", r"C:\Users\bsbp0\tessdata"))
+        # TESSDATA_PREFIX is only set when provided; the system package sets a sane default.
+        tessdata = os.environ.get("TESSDATA_PREFIX")
+        if tessdata:
+            os.environ["TESSDATA_PREFIX"] = tessdata
 
         data = await file.read()
         img = Image.open(_io.BytesIO(data))
         w, h = img.size
-        tess_lang = "tam+eng" if language in ("ta", "tam") else ("hin" if language in ("hi", "hin") else "eng")
+        tess_lang = _resolve_tesseract_lang(language)
         data_dict = pytesseract.image_to_data(img, lang=tess_lang, output_type=pytesseract.Output.DICT)
         regions = []
         full_parts = []
@@ -186,6 +223,30 @@ def _parse_hotwords(prompt: Optional[str]) -> Optional[str]:
     words = [w.strip() for part in prompt.replace(";", ",").split(",") for w in [part] if w.strip()]
     joined = " ".join(words)[:500].strip()
     return joined or None
+
+
+# MetaFrazo only supports these three; auto-detect is clamped to them so Whisper can't
+# wander off to an unrelated language on a short or noisy phrase.
+SUPPORTED_LANGS = ("en", "ta", "hi")
+
+
+def _detect_supported_language(model, audio) -> Optional[str]:
+    """Detect the spoken language but restrict the choice to English/Tamil/Hindi.
+
+    Returns the most probable of the three, or None if detection fails (caller then
+    falls back to the client-provided language).
+    """
+    try:
+        _, _, all_probs = model.detect_language(audio)
+    except Exception:
+        return None
+    # all_probs is a list of (lang, prob); keep only the supported ones.
+    best = None
+    best_p = -1.0
+    for lang, prob in all_probs:
+        if lang in SUPPORTED_LANGS and prob > best_p:
+            best, best_p = lang, prob
+    return best
 
 
 WHISPER_RATE = 16_000
@@ -236,9 +297,12 @@ async def asr(
         prompt = (initial_prompt or "").strip()[:500] or None
         hotwords = _parse_hotwords(initial_prompt)
         model = _get_whisper()
-        # When auto_detect is set, pass language=None so Whisper detects per utterance; this
-        # keeps code-mixed speech (Tamil/Hindi + English) intact instead of forcing one language.
-        decode_lang = None if auto_detect else (language or None)
+        # When auto_detect is set, detect the language but clamp it to the three MetaFrazo
+        # supports (English/Tamil/Hindi). This keeps code-mixed speech intact while stopping
+        # Whisper from guessing an unrelated language on a short or noisy phrase.
+        decode_lang = language or None
+        if auto_detect:
+            decode_lang = _detect_supported_language(model, audio) or (language or None)
         segments, info = model.transcribe(
             audio,
             language=decode_lang,
