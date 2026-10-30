@@ -43,6 +43,17 @@ Android reads URLs from `BuildConfig` (default `http://10.0.2.2:3000` and `http:
 
 ## Local setup (exact commands)
 
+### Quick start: one command for the dev stack
+```
+./scripts/dev-up.sh     # starts backend (:3000) + LiveKit (:7880/7881), sets adb reverse, checks health
+./scripts/dev-down.sh   # stops what dev-up started and clears adb reverse
+```
+Create/join needs both the backend (token) and LiveKit (media) running. A USB phone running the debug
+build talks to `localhost`, so it also needs `adb reverse` for 3000, 8000, 7880, and 7881. `dev-up.sh`
+sets these up again on every run, because `adb reverse` is lost when the phone is replugged. To use
+Wi-Fi without USB, build with `./gradlew assembleDebug -PLAN_HOST=<your Mac's LAN IP>`.
+The sections below are the manual steps.
+
 ### 1. Infra (requires Docker)
 ```
 cd infra

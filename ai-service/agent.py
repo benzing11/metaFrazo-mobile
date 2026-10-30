@@ -21,7 +21,8 @@ LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "ws://localhost:7880")
 LIVEKIT_TOKEN = os.environ.get("LIVEKIT_TOKEN", "")
 LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "devkey")
 LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "secret")
-WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "large-v3")
+WHISPER_RATE = 16_000
 NLLB_MODEL = os.environ.get("NLLB_MODEL", "facebook/nllb-200-distilled-600M")
 LANG_MAP = {"en": "eng_Latn", "ta": "tam_Taml", "hi": "hin_Deva"}
 
@@ -130,7 +131,16 @@ async def main():
             if len(buffer) * len(data) >= sample_rate * 4:
                 audio = np.concatenate(buffer)
                 buffer.clear()
-                segments, info = whisper.transcribe(audio, language=None, sampling_rate=sample_rate)
+                # Whisper expects 16 kHz mono; LiveKit frames are 48 kHz, so downsample first.
+                # (faster-whisper has no sampling_rate argument — passing one raises TypeError.)
+                if sample_rate != WHISPER_RATE:
+                    n = int(len(audio) * WHISPER_RATE / sample_rate)
+                    audio = np.interp(
+                        np.linspace(0, len(audio) - 1, n), np.arange(len(audio)), audio
+                    ).astype("float32")
+                # language=None lets Whisper auto-detect, which keeps code-mixed
+                # (e.g. Tamil + English) speech intact.
+                segments, info = whisper.transcribe(audio, language=None, vad_filter=True)
                 src_lang = info.language if info.language in ("en", "ta", "hi") else "en"
                 for seg in segments:
                     text = seg.text.strip()

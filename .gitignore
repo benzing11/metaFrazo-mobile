@@ -35,3 +35,6 @@ backend/data.db-wal
 # Android
 *.apk
 *.aab
+
+# Dev stack runtime (scripts/dev-up.sh)
+.dev-run/

@@ -70,7 +70,7 @@ fun AppNavHost(navController: NavHostController = rememberNavController(), start
         }
         composable("captions") { CaptionsScreen(onBack = { navController.popBackStack() }) }
         composable("permissions") { PermissionsScreen(onBack = { navController.popBackStack() }) }
-        composable("diagnostics") { DiagnosticsScreen() }
+        composable("diagnostics") { DiagnosticsScreen(onBack = { navController.popBackStack() }) }
         composable("settings") { SettingsScreen(onBack = { navController.popBackStack() }) }
         composable("recordings") { RecordingsScreen(onBack = { navController.popBackStack() }, onPlay = { id -> navController.navigate("player/$id") }) }
         composable("player/{id}", arguments = listOf(navArgument("id") { type = NavType.StringType })) { bs ->

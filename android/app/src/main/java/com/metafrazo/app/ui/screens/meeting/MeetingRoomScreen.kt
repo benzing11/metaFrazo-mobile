@@ -112,7 +112,6 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.metafrazo.app.core.meeting.MeetingCode
@@ -151,7 +150,8 @@ private val StageColors = darkColorScheme(
     surfaceVariant = Color(0xFF242833),
     onSurfaceVariant = Color(0xFFB4B8C4),
     surfaceContainerHigh = Color(0xFF242833),
-    error = Color(0xFFE5484D),
+    // Darkened from #E5484D (3.9:1 vs white) so white text on it passes WCAG AA (~4.6:1).
+    error = Color(0xFFD32F2F),
     onError = Color.White,
     errorContainer = Color(0xFF5C1A1D),
     onErrorContainer = Color(0xFFFFDAD6),
@@ -182,6 +182,10 @@ fun MeetingRoomScreen(
     var inviteBannerDismissed by rememberSaveable { mutableStateOf(false) }
     var confirmLeave by remember { mutableStateOf(false) }
     var translateScreen by remember { mutableStateOf(false) }
+    // Language of the text on the shared screen. This is independent of what the speaker is
+    // saying (a Hindi speaker can share English slides), so it has its own control and
+    // defaults to English, which is the common case for slides and documents.
+    var screenSourceLang by rememberSaveable { mutableStateOf("en") }
     val translationScope = rememberCoroutineScope()
     val screenTranslator = remember { ScreenTranslator(translationScope) }
     val screenTranslation by screenTranslator.state.collectAsState()
@@ -194,6 +198,7 @@ fun MeetingRoomScreen(
     val captionsState by captionsVm.state.collectAsState()
     var captionsOn by remember { mutableStateOf(false) }
     var captionLangPickerOpen by remember { mutableStateOf(false) }
+    var screenLangPickerOpen by remember { mutableStateOf(false) }
     val captionMicLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
             captionsVm.startListening()
@@ -279,8 +284,9 @@ fun MeetingRoomScreen(
     LaunchedEffect(translateScreen, screenShare?.track) {
         val track = screenShare?.track
         if (translateScreen && track != null) {
-            // Sync language pair from caption settings every time translation is toggled on.
-            screenTranslator.sourceLang = captionsState.spokenLang
+            // Source is the slide-text language (independent of the speaker); target follows
+            // the user's chosen caption language so overlay and captions stay consistent.
+            screenTranslator.sourceLang = screenSourceLang
             screenTranslator.targetLang = captionsState.targetLang
             screenTranslator.attach(track)
         } else {
@@ -288,9 +294,9 @@ fun MeetingRoomScreen(
         }
     }
 
-    // Keep screen translator language pair in sync with caption preferences.
-    LaunchedEffect(captionsState.spokenLang, captionsState.targetLang) {
-        screenTranslator.sourceLang = captionsState.spokenLang
+    // Keep the screen translator's language pair current when either side changes.
+    LaunchedEffect(screenSourceLang, captionsState.targetLang) {
+        screenTranslator.sourceLang = screenSourceLang
         screenTranslator.targetLang = captionsState.targetLang
     }
 
@@ -410,6 +416,12 @@ fun MeetingRoomScreen(
                             enabled = screenShare != null,
                             onClick = { menuOpen = false; translateScreen = !translateScreen },
                         )
+                        DropdownMenuItem(
+                            text = { Text("Shared screen is in (${DeviceTranslator.labels[screenSourceLang] ?: screenSourceLang.uppercase()})") },
+                            leadingIcon = { Icon(Icons.Default.Translate, null) },
+                            enabled = screenShare != null,
+                            onClick = { menuOpen = false; screenLangPickerOpen = true },
+                        )
                         HorizontalDivider()
                         DropdownMenuItem(
                             text = { Text(if (state.recording) "Stop recording" else "Start recording") },
@@ -440,6 +452,15 @@ fun MeetingRoomScreen(
                     engine = captionsState.engine,
                     hardWords = captionsState.hardWords,
                     onHardWords = { captionsVm.setHardWords(it) },
+                )
+            }
+        }
+
+        if (screenLangPickerOpen) {
+            ModalBottomSheet(onDismissRequest = { screenLangPickerOpen = false }) {
+                ScreenLanguageSheet(
+                    sourceLang = screenSourceLang,
+                    onSourceLang = { screenSourceLang = it },
                 )
             }
         }
@@ -488,7 +509,8 @@ private fun RoomHeader(
                     shape = CircleShape,
                 ) {
                     Row(
-                        Modifier.padding(start = 12.dp, end = 10.dp, top = 6.dp, bottom = 6.dp),
+                        // 12dp vertical padding brings the pill to ~44-48dp, a comfortable tap target.
+                        Modifier.padding(start = 14.dp, end = 12.dp, top = 12.dp, bottom = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
@@ -861,8 +883,7 @@ private fun CaptionOverlay(
                     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         Text(
                             shown.main,
-                            style = MaterialTheme.typography.titleLarge.copy(fontSize = 19.sp, lineHeight = 26.sp),
-                            fontWeight = FontWeight.Medium,
+                            style = MaterialTheme.typography.titleLarge,
                             color = Color.White,
                             maxLines = 3,
                             overflow = TextOverflow.Ellipsis,
@@ -1026,6 +1047,34 @@ private fun CaptionLanguageSheet(
         if (status.isNotBlank()) {
             Text(status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+    }
+}
+
+@Composable
+private fun ScreenLanguageSheet(
+    sourceLang: String,
+    onSourceLang: (String) -> Unit,
+) {
+    // On-device OCR (ML Kit) only reads Latin and Devanagari scripts, so only offer the
+    // languages it can actually recognize on the shared screen.
+    val ocrSupported = listOf("en", "hi", "mr", "es", "fr", "de")
+    Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 32.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("Shared screen", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+        Text("Text on the screen is in", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(ocrSupported) { lang ->
+                androidx.compose.material3.FilterChip(
+                    selected = sourceLang == lang,
+                    onClick = { onSourceLang(lang) },
+                    label = { Text(DeviceTranslator.labels[lang] ?: lang.uppercase()) },
+                )
+            }
+        }
+        Text(
+            "The overlay translates this into your caption language. On-device screen reading supports Latin and Devanagari text only.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

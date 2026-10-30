@@ -6,6 +6,7 @@ import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.devanagari.DevanagariTextRecognizerOptions
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import com.metafrazo.app.core.translate.DeviceTranslator
+import com.metafrazo.app.core.translate.TranslateResult
 import com.metafrazo.app.ui.components.OverlayRegion
 import io.livekit.android.room.track.VideoTrack
 import kotlinx.coroutines.CoroutineScope
@@ -93,13 +94,12 @@ class ScreenTranslator(
                 val rotated = rotation == 90 || rotation == 270
                 val w = (if (rotated) height else width).toFloat()
                 val h = (if (rotated) width else height).toFloat()
-                val regions = recognize(image, w, h)
+                val result = recognize(image, w, h)
                 if (manager.isStale(generation)) return@launch
                 _state.value = State(
-                    regions = regions,
+                    regions = result.regions,
                     aspect = w / h,
-                    status = if (regions.isEmpty()) "No text found on the shared screen"
-                             else "Translated ${regions.size} text block${if (regions.size == 1) "" else "s"}",
+                    status = result.status,
                 )
             } catch (e: Exception) {
                 Log.w("ScreenTranslator", "frame failed", e)
@@ -112,35 +112,97 @@ class ScreenTranslator(
         }
     }
 
-    private suspend fun recognize(image: InputImage, w: Float, h: Float): List<OverlayRegion> {
-        // Choose the right OCR model: Devanagari-script languages, Latin for everything else.
+    private data class Pass(val regions: List<OverlayRegion>, val status: String)
+
+    private suspend fun recognize(image: InputImage, w: Float, h: Float): Pass {
+        // ML Kit on-device OCR only ships Latin and Devanagari recognizers. Pick Devanagari
+        // for Devanagari-script languages; use Latin for Latin-script languages. Everything
+        // else (Tamil, Telugu, Kannada, Bengali, Gujarati, Urdu, Arabic, Chinese …) has no
+        // on-device recognizer, so report that honestly instead of silently returning nothing.
         val devanagariLangs = setOf("hi", "mr", "ne", "sa")
-        val client = if (sourceLang in devanagariLangs) devanagari else latin
+        val latinLangs = setOf("en", "es", "fr", "de", "it", "pt", "nl", "id", "ms", "tr", "vi")
+        val client = when (sourceLang) {
+            in devanagariLangs -> devanagari
+            in latinLangs -> latin
+            else -> {
+                val label = DeviceTranslator.labels[sourceLang] ?: sourceLang.uppercase()
+                return Pass(emptyList(), "On-device screen OCR supports Latin and Devanagari text only; $label isn't available")
+            }
+        }
+
         val text = suspendCancellableCoroutine<com.google.mlkit.vision.text.Text?> { cont ->
             client.process(image)
                 .addOnSuccessListener { cont.resume(it) }
-                .addOnFailureListener { cont.resume(null) }
-        } ?: return emptyList()
+                .addOnFailureListener { e ->
+                    Log.w("ScreenTranslator", "OCR failed", e)
+                    cont.resume(null)
+                }
+        } ?: return Pass(emptyList(), "Couldn't read text from the shared screen")
 
-        // Warm up (or reuse) the translation model.
-        if (sourceLang != targetLang) DeviceTranslator.prepare(sourceLang, targetLang)
+        // Make sure the translation model for this pair is downloaded before translating.
+        if (sourceLang != targetLang) {
+            val prepError = DeviceTranslator.prepare(sourceLang, targetLang)
+            if (prepError != null) {
+                Log.w("ScreenTranslator", "model prepare failed: $prepError")
+                // Still show the detected (untranslated) text so the overlay isn't empty,
+                // but tell the user translation is unavailable.
+                val raw = text.textBlocks.mapNotNull { block ->
+                    val box = block.boundingBox ?: return@mapNotNull null
+                    val original = block.text.replace('\n', ' ').trim()
+                    if (original.length < 2) return@mapNotNull null
+                    OverlayRegion(
+                        text = original,
+                        translated = original,
+                        x = box.left / w,
+                        y = box.top / h,
+                        w = box.width() / w,
+                        h = box.height() / h,
+                    )
+                }
+                return Pass(raw, "Translation unavailable ($prepError)")
+            }
+        }
 
-        return text.textBlocks.mapNotNull { block ->
+        var translated = 0
+        var failed = 0
+        val regions = text.textBlocks.mapNotNull { block ->
             val box = block.boundingBox ?: return@mapNotNull null
             val original = block.text.replace('\n', ' ').trim()
             if (original.length < 2) return@mapNotNull null
-            val translated = if (sourceLang == targetLang) original
-                             else DeviceTranslator.translate(original, sourceLang, targetLang)
+            val shown = if (sourceLang == targetLang) {
+                original
+            } else {
+                when (val r = DeviceTranslator.translateResult(original, sourceLang, targetLang)) {
+                    is TranslateResult.Translated -> { translated++; r.text }
+                    is TranslateResult.SameLanguage -> r.text
+                    is TranslateResult.Unsupported -> { failed++; r.text }
+                    is TranslateResult.Failed -> {
+                        Log.w("ScreenTranslator", "translate failed: ${r.reason}")
+                        failed++; r.text
+                    }
+                }
+            }
             OverlayRegion(
                 text = original,
-                translated = translated,
+                translated = shown,
                 x = box.left / w,
                 y = box.top / h,
                 w = box.width() / w,
                 h = box.height() / h,
             )
         }
+
+        val status = when {
+            regions.isEmpty() -> "No text found on the shared screen"
+            sourceLang == targetLang -> "Showing ${regions.size} text block${plural(regions.size)}"
+            failed > 0 && translated == 0 -> "Couldn't translate the detected text"
+            failed > 0 -> "Translated $translated of ${regions.size} text blocks"
+            else -> "Translated ${regions.size} text block${plural(regions.size)}"
+        }
+        return Pass(regions, status)
     }
+
+    private fun plural(n: Int) = if (n == 1) "" else "s"
 
     fun close() {
         detach()

@@ -39,6 +39,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -311,6 +312,7 @@ fun ChatScreen(meetingCode: String, onBack: () -> Unit) {
             Modifier
                 .fillMaxSize()
                 .padding(top = padding.calculateTopPadding())
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom))
                 .imePadding(),
         ) {
             Box(Modifier.weight(1f)) {
@@ -427,6 +429,8 @@ private fun MessageBubble(m: Message, readLang: String, onSpeak: () -> Unit) {
                 Box(
                     Modifier
                         .align(Alignment.End)
+                        // 48dp minimum touch target while the visual stays a 32dp chip.
+                        .minimumInteractiveComponentSize()
                         .size(32.dp)
                         .clip(CircleShape)
                         .clickable(role = Role.Button, onClick = onSpeak),

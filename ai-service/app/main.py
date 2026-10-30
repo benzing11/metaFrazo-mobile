@@ -176,6 +176,18 @@ def _get_whisper():
     return _whisper
 
 
+def _parse_hotwords(prompt: Optional[str]) -> Optional[str]:
+    """Turn a comma/semicolon list of names and jargon into a hotwords string.
+
+    faster-whisper biases decoding toward these terms far more reliably than `initial_prompt`.
+    """
+    if not prompt:
+        return None
+    words = [w.strip() for part in prompt.replace(";", ",").split(",") for w in [part] if w.strip()]
+    joined = " ".join(words)[:500].strip()
+    return joined or None
+
+
 WHISPER_RATE = 16_000
 # Caps one upload at ~30 s of 16 kHz mono 16-bit audio so a bad client can't exhaust memory.
 MAX_PCM_BYTES = WHISPER_RATE * 2 * 30
@@ -188,12 +200,15 @@ async def asr(
     encoding: Optional[str] = Form(None),
     sample_rate: Optional[int] = Form(None),
     initial_prompt: Optional[str] = Form(None),
+    auto_detect: Optional[bool] = Form(False),
 ):
     """Transcribes one utterance.
 
     `encoding=pcm_s16le` with `sample_rate` sends raw mono PCM (what the Android app streams);
     otherwise the upload is decoded as a container file. `initial_prompt` biases decoding toward
-    names and domain terms the caller expects.
+    names and domain terms the caller expects; those terms are also passed as Whisper `hotwords`.
+    Set `auto_detect=true` to let Whisper pick the language per utterance, which transcribes
+    code-mixed speech (e.g. Tamil + English) far better than forcing a single language.
     """
     if not _check_module("faster_whisper"):
         return {"error": "faster-whisper not installed"}
@@ -219,18 +234,23 @@ async def asr(
             return {"error": "no audio"}
 
         prompt = (initial_prompt or "").strip()[:500] or None
+        hotwords = _parse_hotwords(initial_prompt)
         model = _get_whisper()
+        # When auto_detect is set, pass language=None so Whisper detects per utterance; this
+        # keeps code-mixed speech (Tamil/Hindi + English) intact instead of forcing one language.
+        decode_lang = None if auto_detect else (language or None)
         segments, info = model.transcribe(
             audio,
-            language=language or None,
+            language=decode_lang,
             task="transcribe",
             beam_size=5,
             best_of=5,
             temperature=0.0,
             vad_filter=True,
             condition_on_previous_text=False,
-            # Whisper absorbs names better when the initial prompt is phrased like
-            # prior speech; keep the user's words verbatim after a short lead-in.
+            # hotwords biases decoding toward the caller's names/jargon more reliably than a prompt;
+            # initial_prompt still helps with general meeting context.
+            hotwords=hotwords,
             initial_prompt=(f"Transcription of a meeting. {prompt}." if prompt else None),
         )
         out = [{"text": s.text.strip(), "start": s.start, "end": s.end} for s in segments]

@@ -25,6 +25,8 @@ class WhisperAsrSource(
     private val micFeed: MeetingMicFeed,
     private val aiUrl: () -> String,
     private val language: String,
+    /** When true, let Whisper detect the language per phrase so mixed-language speech stays intact. */
+    private val autoDetect: () -> Boolean,
     /** Names and terms Whisper should prefer when decoding. */
     private val prompt: () -> String,
     private val onFinal: (String) -> Unit,
@@ -114,6 +116,7 @@ class WhisperAsrSource(
                 field("encoding", "pcm_s16le")
                 field("sample_rate", MeetingMicFeed.TARGET_RATE.toString())
                 field("language", language)
+                if (autoDetect()) field("auto_detect", "true")
                 prompt().trim().takeIf { it.isNotEmpty() }?.let { field("initial_prompt", it) }
                 o.writeBytes(
                     "--$boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"phrase.pcm\"\r\n" +

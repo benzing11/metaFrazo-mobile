@@ -56,13 +56,15 @@ data class CaptionsUiState(
     val hearing: Boolean = false,
     /** Names and terms passed to Whisper so they're spelled correctly. */
     val hardWords: String = "",
+    /** Let Whisper auto-detect the language per phrase so mixed Tamil/Hindi + English stays intact. */
+    val autoDetectLang: Boolean = true,
 )
 
 class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
     companion object {
         private const val FLUSH_INTERVAL_MS = 10_000L
         /** Short enough to feel instant, long enough to skip translating every recognizer tick. */
-        private const val PARTIAL_DEBOUNCE_MS = 80L
+        private const val PARTIAL_DEBOUNCE_MS = 40L
         /** Whisper reads at most ~224 prompt tokens; the service also truncates. */
         private const val MAX_HARD_WORDS_CHARS = 400
 
@@ -97,12 +99,15 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
     init {
         val savedTarget = prefs.getString("target_lang", null)?.takeIf { it in DeviceTranslator.supported }
         val savedSpoken = prefs.getString("spoken_lang", null)?.takeIf { it in DeviceTranslator.supported }
+        // Speak incoming translations aloud by default. Seeding the pref on first run means the
+        // choice still sticks once the user turns it off.
         _state.value = _state.value.copy(
-            speakTranslations = prefs.getBoolean("speak_translations", false),
+            speakTranslations = prefs.getBoolean("speak_translations", true),
             speakChat = prefs.getBoolean("speak_chat", false),
             targetLang = savedTarget ?: _state.value.targetLang,
             spokenLang = savedSpoken ?: _state.value.spokenLang,
             hardWords = prefs.getString("hard_words", "").orEmpty(),
+            autoDetectLang = prefs.getBoolean("auto_detect_lang", true),
         )
     }
 
@@ -110,6 +115,11 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
         val trimmed = words.take(MAX_HARD_WORDS_CHARS)
         prefs.edit().putString("hard_words", trimmed).apply()
         _state.value = _state.value.copy(hardWords = trimmed)
+    }
+
+    fun setAutoDetectLang(enabled: Boolean) {
+        prefs.edit().putBoolean("auto_detect_lang", enabled).apply()
+        _state.value = _state.value.copy(autoDetectLang = enabled)
     }
 
     /** Lets other screens pause dictation while they play speech, so it is not re-transcribed. */
@@ -312,6 +322,7 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
             micFeed = MeetingMicFeed { MeetingViewModel.activeRoom },
             aiUrl = { Api.aiUrl },
             language = _state.value.spokenLang,
+            autoDetect = { _state.value.autoDetectLang },
             prompt = { _state.value.hardWords },
             onFinal = { text ->
                 _state.value = _state.value.copy(hearing = false)
