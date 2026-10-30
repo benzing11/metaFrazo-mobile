@@ -3,6 +3,22 @@ import { requireUser } from "@/lib/auth";
 import { getDb } from "@/lib/db";
 import fs from "node:fs";
 
+function contentTypeFor(path: string): string {
+  const ext = (path.split(".").pop() || "").toLowerCase();
+  switch (ext) {
+    case "mkv":
+      return "video/x-matroska";
+    case "webm":
+      return "video/webm";
+    case "mov":
+      return "video/quicktime";
+    case "m4v":
+    case "mp4":
+    default:
+      return "video/mp4";
+  }
+}
+
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const r = await requireUser(req);
   if ("error" in r) return r.error;
@@ -17,11 +33,22 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
   const stat = fs.statSync(rec.storage_path);
+  const contentType = contentTypeFor(rec.storage_path);
   const range = req.headers.get("range");
   if (range) {
-    const parts = range.replace(/bytes=/, "").split("-");
-    const start = parseInt(parts[0], 10);
-    const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
+    const m = /^bytes=(\\d*)-(\\d*)$/.exec(range.trim());
+    if (!m || (m[1] === "" && m[2] === "")) {
+      return new NextResponse(null, { status: 416, headers: { "Content-Range": `bytes */${stat.size}` } });
+    }
+    let start = m[1] === "" ? Math.max(0, stat.size - parseInt(m[2], 10)) : parseInt(m[1], 10);
+    let end = m[2] === "" ? stat.size - 1 : parseInt(m[2], 10);
+    if (isNaN(start) || isNaN(end) || start < 0 || end < 0 || start >= stat.size) {
+      return new NextResponse(null, { status: 416, headers: { "Content-Range": `bytes */${stat.size}` } });
+    }
+    end = Math.min(end, stat.size - 1);
+    if (start > end) {
+      return new NextResponse(null, { status: 416, headers: { "Content-Range": `bytes */${stat.size}` } });
+    }
     const chunkSize = end - start + 1;
     const stream = fs.createReadStream(rec.storage_path, { start, end });
     return new NextResponse(stream as any, {
@@ -30,7 +57,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         "Content-Range": `bytes ${start}-${end}/${stat.size}`,
         "Accept-Ranges": "bytes",
         "Content-Length": String(chunkSize),
-        "Content-Type": "video/mp4",
+        "Content-Type": contentType,
       },
     });
   }
@@ -40,7 +67,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     headers: {
       "Accept-Ranges": "bytes",
       "Content-Length": String(stat.size),
-      "Content-Type": "video/mp4",
+      "Content-Type": contentType,
     },
   });
 }

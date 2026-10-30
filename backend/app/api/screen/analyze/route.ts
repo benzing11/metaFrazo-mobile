@@ -15,8 +15,18 @@ export async function POST(req: NextRequest) {
   fd.append("file", file);
   fd.append("language", "eng");
   const ocrRes = await fetch(`${AI}/ocr`, { method: "POST", body: fd });
-  const ocr = await ocrRes.json();
-  const regions = (ocr.regions || []).map((rg: any) => rg);
+  let regions: any[] = [];
+  if (ocrRes.ok) {
+    try {
+      const ocr = await ocrRes.json();
+      regions = Array.isArray(ocr.regions) ? ocr.regions.map((rg: any) => rg) : [];
+    } catch {
+      regions = [];
+    }
+  } else {
+    // OCR not available on the AI service; return empty rather than throwing.
+    console.warn("AI service /ocr unavailable:", ocrRes.status);
+  }
 
   // translate each region text per target language
   const outRegions = [];
