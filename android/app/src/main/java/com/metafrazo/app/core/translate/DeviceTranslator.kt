@@ -55,6 +55,7 @@ object DeviceTranslator {
     )
 
     private val translators = mutableMapOf<String, Translator>()
+    private val prepared = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
     private val lock = Any()
 
     private fun mlLang(code: String): String? = when (code) {
@@ -89,10 +90,17 @@ object DeviceTranslator {
     /** Downloads the model for a pair if needed. Returns null on success, else an error message. */
     suspend fun prepare(source: String, target: String): String? {
         if (source == target) return null
+        val s = mlLang(source) ?: return "Unsupported language $source"
+        val t = mlLang(target) ?: return "Unsupported language $target"
+        val key = "$s>$t"
+        if (prepared.containsKey(key)) return null
         val tr = translator(source, target) ?: return "Unsupported language pair $source>$target"
         return suspendCancellableCoroutine { cont ->
             tr.downloadModelIfNeeded(DownloadConditions.Builder().build())
-                .addOnSuccessListener { cont.resume(null) }
+                .addOnSuccessListener {
+                    prepared[key] = true
+                    cont.resume(null)
+                }
                 .addOnFailureListener { cont.resume("Model download failed: ${it.message}") }
         }
     }

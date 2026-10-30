@@ -427,13 +427,13 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
             replaceCaption(withTarget)
             speakAloud(withTarget)
 
-            // Step 3: Fan out to remaining languages for remote participants on a background scope.
-            // This never blocks the display path and failures only affect remote peers.
+            // Step 3: Fan out to remote participants' preferred languages only (not all 13).
             uploadScope.launch {
+                val remoteTargets = recipientPrefs.values.toSet()
                 val allTranslations = translations.toMutableMap()
                 val failures = mutableListOf<String>()
-                for (lang in TranslationPlan.targetsFor(s.spokenLang, DeviceTranslator.supported)) {
-                    if (lang == s.targetLang) continue
+                for (lang in remoteTargets) {
+                    if (lang == s.targetLang || allTranslations.containsKey(lang)) continue
                     val prepError = DeviceTranslator.prepare(s.spokenLang, lang)
                     if (prepError != null) { failures += "${lang.uppercase()}: $prepError"; continue }
                     when (val r = DeviceTranslator.translateResult(text, s.spokenLang, lang)) {
