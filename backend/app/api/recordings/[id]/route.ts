@@ -13,6 +13,16 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
      WHERE r.id = ? AND mem.user_id = ?`,
   ).get(id, r.uid) as any;
   if (!rec) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (rec.storage_path && (rec.status === "processing" || rec.status === "recording")) {
+    const fs = await import("node:fs");
+    try {
+      const st = fs.statSync(rec.storage_path);
+      if (st.isFile() && st.size > 0) {
+        db.prepare("UPDATE recordings SET status = ?, file_size_bytes = ?, updated_at = ? WHERE id = ?").run("ready", st.size, new Date().toISOString(), id);
+        rec.status = "ready"; rec.file_size_bytes = st.size;
+      }
+    } catch {}
+  }
   return NextResponse.json({ recording: rec });
 }
 

@@ -19,6 +19,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ cod
   const mem = db.prepare("SELECT role FROM memberships WHERE meeting_id = ? AND user_id = ?").get(meeting.id, r.uid) as any;
   if (!mem || mem.role !== "host") return NextResponse.json({ error: "Host only" }, { status: 403 });
 
+  // Prevent double-starting a recording while one is already in flight.
+  const inFlight = db.prepare("SELECT id, status FROM recordings WHERE meeting_id = ? AND status IN ('starting','recording','stopping','processing') ORDER BY created_at DESC LIMIT 1").get(meeting.id) as any;
+  if (inFlight) {
+    return NextResponse.json({ recordingId: inFlight.id, status: inFlight.status, alreadyRunning: true }, { status: 409 });
+  }
+
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   const storageDir = process.env.RECORDINGS_DIR || "./data/recordings";

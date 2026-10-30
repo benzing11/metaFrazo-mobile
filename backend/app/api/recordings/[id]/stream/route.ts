@@ -25,12 +25,20 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   const { id } = await params;
   const db = getDb();
   const rec = db.prepare(
-    `SELECT r.storage_path FROM recordings r JOIN meetings m ON m.id = r.meeting_id
+    `SELECT r.id, r.status, r.storage_path FROM recordings r JOIN meetings m ON m.id = r.meeting_id
      JOIN memberships mem ON mem.meeting_id = m.id
      WHERE r.id = ? AND mem.user_id = ?`,
   ).get(id, r.uid) as any;
   if (!rec || !rec.storage_path || !fs.existsSync(rec.storage_path)) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+  if (rec.status === "processing" || rec.status === "recording" || rec.status === "stopping") {
+    try {
+      const st = fs.statSync(rec.storage_path);
+      if (st.isFile() && st.size > 0) {
+        db.prepare("UPDATE recordings SET status = ?, file_size_bytes = ?, updated_at = ? WHERE id = ?").run("ready", st.size, new Date().toISOString(), rec.id);
+      }
+    } catch {}
   }
   const stat = fs.statSync(rec.storage_path);
   const contentType = contentTypeFor(rec.storage_path);
