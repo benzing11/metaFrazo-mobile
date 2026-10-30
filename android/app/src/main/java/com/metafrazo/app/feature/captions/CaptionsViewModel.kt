@@ -339,13 +339,18 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
                         // Show the caption right away (original as placeholder); don't block the
                         // event collector on a model download.
                         addCaption(remote)
-                        speakAloud(remote)
+
+                        // The placeholder holds the sender's untranslated text, so only speak now
+                        // when the sender already included a real translation for our language.
+                        // Otherwise wait and speak the translation once it arrives below, which
+                        // avoids reading foreign text aloud in the wrong voice and then repeating it.
+                        val needsTranslation = sourceLang != target &&
+                            trans[target] == original && original.isNotBlank()
+                        if (!needsTranslation) speakAloud(remote)
 
                         // Translate into the reader's language off the collector, then update the
                         // caption in place. Earlier this ran inline and silently showed the raw
                         // foreign text whenever the model wasn't downloaded yet.
-                        val needsTranslation = sourceLang != target &&
-                            trans[target] == original && original.isNotBlank()
                         if (needsTranslation) {
                             viewModelScope.launch {
                                 val prepErr = DeviceTranslator.prepare(sourceLang, target)
@@ -498,7 +503,7 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
         flushTranscript()
         speech?.stop()
         speech = null
-        _state.value = _state.value.copy(listening = false, partial = "", partialTranslated = "", engine = "", hearing = false)
+        _state.value = _state.value.copy(listening = false, partial = "", partialTranslated = "", engine = "", hearing = false, autoDetectUnsupported = false)
         // Dictation stopped: bring the raw mic back if voice replacement had muted it.
         applyVoiceReplacement()
     }
@@ -545,7 +550,8 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
             }
             val withTarget = shown.copy(translations = TranslationPlan.merge(s.spokenLang, text, translations))
             replaceCaption(withTarget)
-            speakAloud(withTarget)
+            // Don't read our own speech back: TTS pauses the mic while it plays, which would
+            // stall captions every sentence. Only remote speakers are spoken aloud.
 
             // Step 3: Fan out to remote participants' preferred languages only (not all 13).
             uploadScope.launch {

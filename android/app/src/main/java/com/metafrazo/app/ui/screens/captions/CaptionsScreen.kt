@@ -154,6 +154,13 @@ fun CaptionsScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        if (state.autoDetectUnsupported) {
+                            Text(
+                                "This phone can't switch languages live — staying on ${state.spokenLang.uppercase()}. Run the AI service for full auto-detect.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
                     }
                     Switch(checked = state.autoDetectLang, onCheckedChange = { vm.setAutoDetectLang(it) })
                 }

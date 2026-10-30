@@ -129,9 +129,12 @@ class SpeechRecognizerSource(
     override fun pause() {
         if (!wantRunning || paused) return
         paused = true
-        try {
-            recognizer?.cancel()
-        } catch (_: Exception) {
+        // SpeechRecognizer is a main-thread-only API; pause() can arrive on a TTS callback thread.
+        main.post {
+            try {
+                recognizer?.cancel()
+            } catch (_: Exception) {
+            }
         }
     }
 
@@ -142,6 +145,12 @@ class SpeechRecognizerSource(
     }
 
     private fun listen() {
+        // resume() is invoked from TTS callbacks on a background thread; startListening()
+        // must run on the main thread or it throws "used only from the application's main thread".
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            main.post { listen() }
+            return
+        }
         if (paused || !wantRunning) return
         lastActivityAt = System.currentTimeMillis()
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -266,11 +275,14 @@ class SpeechRecognizerSource(
         wantRunning = false
         main.removeCallbacksAndMessages(null)
         micFeed?.stop()
-        try {
-            recognizer?.stopListening()
-        } catch (_: Exception) {
+        // SpeechRecognizer calls must run on the main thread.
+        main.post {
+            try {
+                recognizer?.stopListening()
+            } catch (_: Exception) {
+            }
+            destroyRecognizer()
         }
-        destroyRecognizer()
     }
 
     private companion object {
