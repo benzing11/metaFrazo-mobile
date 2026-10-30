@@ -10,8 +10,13 @@ from app.engines import get_engine
 
 app = FastAPI(title="MetaFrazo AI Service", version="0.1.0")
 
-LANG_MAP = {"en": "eng_Latn", "ta": "tam_Taml", "hi": "hin_Deva"}
-NLLB_MODEL = os.environ.get("NLLB_MODEL", "facebook/nllb-200-distilled-600M")
+LANG_MAP = {
+    "en": "eng_Latn",
+    "ta": "tam_Taml",
+    "hi": "hin_Deva"
+}
+# Using IndicTrans2 as the heavy-duty engine
+INDIC_TRANS_MODEL = os.environ.get("INDIC_TRANS_MODEL", "ai4bharat/indictrans2-en-indic-1B")
 
 # Lazy-loaded models
 _whisper = None
@@ -167,7 +172,7 @@ def _get_whisper():
     if _whisper is None:
         from faster_whisper import WhisperModel
 
-        _whisper = WhisperModel(os.environ.get("WHISPER_MODEL", "base"), device="cpu", compute_type="int8")
+        _whisper = WhisperModel(os.environ.get("WHISPER_MODEL", "large-v3"), device="cpu", compute_type="int8")
     return _whisper
 
 
@@ -239,13 +244,14 @@ async def asr(
         return {"error": str(e)}
 
 
-def _get_nllb():
+def _get_indic_trans():
     global _nllb_tok, _nllb_model
     if _nllb_tok is None:
         from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-
-        _nllb_tok = AutoTokenizer.from_pretrained(NLLB_MODEL)
-        _nllb_model = AutoModelForSeq2SeqLM.from_pretrained(NLLB_MODEL)
+        # IndicTrans2 uses different naming convention for src/tgt. 
+        # For now, keeping the structure but pointing to the new weights.
+        _nllb_tok = AutoTokenizer.from_pretrained(INDIC_TRANS_MODEL, trust_remote_code=True)
+        _nllb_model = AutoModelForSeq2SeqLM.from_pretrained(INDIC_TRANS_MODEL, trust_remote_code=True)
     return _nllb_tok, _nllb_model
 
 
@@ -253,18 +259,33 @@ def _get_nllb():
 def translate(req: TranslateRequest):
     if not _check_module("transformers") or not _check_module("torch"):
         return TranslateResponse(translated_text=req.text, source_lang=req.source_lang, target_lang=req.target_lang)
-    src = LANG_MAP.get(req.source_lang, "eng_Latn")
-    tgt = LANG_MAP.get(req.target_lang, "eng_Latn")
-    if src == tgt:
-        return TranslateResponse(translated_text=req.text, source_lang=req.source_lang, target_lang=req.target_lang)
+    # IndicTrans2 expects the input text to be wrapped in language tags
+    # Example: "<2hi> Text to translate"
+    # We need to map our simple 'en', 'hi', 'ta' codes to the tags the tokenizer understands
+    # IndicTrans2 standard: "en_Latn", "hin_Deva", "tam_Taml"
+    lang_tags = {
+        "en": "eng_Latn",
+        "hi": "hin_Deva",
+        "ta": "tam_Taml"
+    }
+    src_tag = lang_tags.get(req.source_lang)
+    tgt_tag = lang_tags.get(req.target_lang)
+    
+    if not src_tag or not tgt_tag:
+         return TranslateResponse(translated_text=req.text, source_lang=req.source_lang, target_lang=req.target_lang)
+    
+    # Prepend the target language tag
+    text_to_translate = f"<{tgt_tag}> {req.text}"
+    
     try:
         import torch
-
-        tok, model = _get_nllb()
-        inputs = tok(req.text, return_tensors="pt")
-        forced = tok.convert_tokens_to_ids(tgt)
-        out = model.generate(**inputs, forced_bos_token_id=forced, max_length=256)
+        tok, model = _get_indic_trans()
+        
+        inputs = tok(text_to_translate, return_tensors="pt")
+        # IndicTrans2 does not always require forced_bos_token_id when using the prefix tag
+        out = model.generate(**inputs, max_length=256)
         translated = tok.batch_decode(out, skip_special_tokens=True)[0]
+        
         return TranslateResponse(translated_text=translated, source_lang=req.source_lang, target_lang=req.target_lang)
     except Exception as e:
         return TranslateResponse(translated_text=req.text, source_lang=req.source_lang, target_lang=req.target_lang)

@@ -37,6 +37,7 @@ export async function requireUser(req: Request): Promise<AuthResult> {
     }
     return { uid, email };
   }
+
   const authHeader = req.headers.get("authorization") || "";
   const match = authHeader.match(/^Bearer (.+)$/);
   if (!match) {
