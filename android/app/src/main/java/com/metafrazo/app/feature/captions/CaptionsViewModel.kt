@@ -228,6 +228,16 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
                     ev.participant.identity?.value?.let { recipientPrefs.remove(it) }
                     return@collect
                 }
+                if (ev is io.livekit.android.events.RoomEvent.ParticipantConnected) {
+                    // Proactively tell the newly connected peer our language preference
+                    ev.participant.identity?.value?.let { announcePreference(toIdentity = it) }
+                    return@collect
+                }
+                if (ev is io.livekit.android.events.RoomEvent.Reconnected) {
+                    // Re-announce our preference to the room after network reconnection
+                    announcePreference()
+                    return@collect
+                }
                 if (ev is io.livekit.android.events.RoomEvent.DataReceived) {
                     try {
                         val json = JSONObject(String(ev.data))
@@ -529,20 +539,18 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun addCaption(item: CaptionItem) {
         val s = _state.value
+        val updated = CaptionUpsert.upsert(s.captions, item)
         _state.value = if (item.isLocal) {
             // The final line replaces the live partial in a single state update: no blank frame.
-            s.copy(captions = (s.captions + item).takeLast(200), partial = "", partialTranslated = "")
+            s.copy(captions = updated, partial = "", partialTranslated = "")
         } else {
-            s.copy(captions = (s.captions + item).takeLast(200))
+            s.copy(captions = updated)
         }
     }
 
     /** Swaps in the fully translated copy of a caption already on screen (matched by timestamp). */
     private fun replaceCaption(item: CaptionItem) {
-        val s = _state.value
-        _state.value = s.copy(
-            captions = s.captions.map { if (it.isLocal && it.ts == item.ts) item else it },
-        )
+        addCaption(item)
     }
 
     fun clearError() {
