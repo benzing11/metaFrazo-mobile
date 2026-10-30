@@ -23,6 +23,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import io.livekit.android.compose.ui.ScaleType
 import io.livekit.android.compose.ui.VideoTrackView
 import io.livekit.android.room.Room
 import io.livekit.android.room.track.VideoTrack
@@ -38,6 +39,12 @@ fun ParticipantTile(
     isLocal: Boolean,
     isScreenShare: Boolean,
     modifier: Modifier = Modifier,
+    /**
+     * Video scale type. Use [ScaleType.FitInside] for screen-share tiles so that translated
+     * overlay regions (which are computed from the full video frame) line up with the video.
+     * Defaults to [ScaleType.Fill] (centre-crop) to fill the camera grid without letterboxing.
+     */
+    scaleType: ScaleType = ScaleType.Fill,
 ) {
     val borderColor by animateColorAsState(
         if (isSpeaking) MaterialTheme.colorScheme.primary else Color.Transparent,
@@ -50,7 +57,12 @@ fun ParticipantTile(
             .border(3.dp, borderColor, MaterialTheme.shapes.medium),
     ) {
         if (track != null) {
-            VideoTrackView(videoTrack = track, modifier = Modifier.fillMaxSize(), passedRoom = room)
+            VideoTrackView(
+                videoTrack = track,
+                modifier = Modifier.fillMaxSize(),
+                passedRoom = room,
+                scaleType = scaleType,
+            )
         } else {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Box(

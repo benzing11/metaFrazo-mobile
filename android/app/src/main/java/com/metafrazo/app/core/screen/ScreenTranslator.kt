@@ -47,8 +47,11 @@ class ScreenTranslator(
     private var track: VideoTrack? = null
     private var job: Job? = null
 
+    /** Language the text on the shared screen is in. Defaults to English. */
     @Volatile var sourceLang: String = "en"
-    @Volatile var targetLang: String = "ta"
+
+    /** Language to translate overlay text into. Defaults to Hindi. */
+    @Volatile var targetLang: String = "hi"
 
     private val sink = VideoSink { frame -> onFrame(frame) }
 
@@ -58,6 +61,7 @@ class ScreenTranslator(
         track = videoTrack
         videoTrack.addRenderer(sink)
         _state.value = _state.value.copy(status = "Reading shared screen…")
+        Log.i("ScreenTranslator", "attached track, src=$sourceLang tgt=$targetLang")
     }
 
     fun detach() {
@@ -66,18 +70,22 @@ class ScreenTranslator(
         job?.cancel()
         manager.nextGeneration()
         _state.value = State()
+        busy.set(false)
     }
 
     private fun onFrame(frame: VideoFrame) {
         val now = System.currentTimeMillis()
         if (now - lastSample < intervalMs || !busy.compareAndSet(false, true)) return
         lastSample = now
-        // Copy pixels synchronously: the frame is only valid during this callback.
+
+        // Copy pixels synchronously (we're on WebRTC's render thread) but keep it minimal:
+        // convert to I420 and immediately copy to a ByteArray so the frame can be released.
         val i420 = frame.buffer.toI420() ?: run { busy.set(false); return }
         val width = i420.width
         val height = i420.height
         val rotation = frame.rotation
         val nv21 = try { toNv21(i420) } finally { i420.release() }
+
         val generation = manager.nextGeneration()
         job = scope.launch(Dispatchers.Default) {
             try {
@@ -90,11 +98,14 @@ class ScreenTranslator(
                 _state.value = State(
                     regions = regions,
                     aspect = w / h,
-                    status = if (regions.isEmpty()) "No text found on the shared screen" else "Translated ${regions.size} text blocks",
+                    status = if (regions.isEmpty()) "No text found on the shared screen"
+                             else "Translated ${regions.size} text block${if (regions.size == 1) "" else "s"}",
                 )
             } catch (e: Exception) {
                 Log.w("ScreenTranslator", "frame failed", e)
-                _state.value = _state.value.copy(status = "Screen translation error: ${e.message}")
+                if (!manager.isStale(generation)) {
+                    _state.value = _state.value.copy(status = "Screen translation error: ${e.message}")
+                }
             } finally {
                 busy.set(false)
             }
@@ -102,20 +113,27 @@ class ScreenTranslator(
     }
 
     private suspend fun recognize(image: InputImage, w: Float, h: Float): List<OverlayRegion> {
-        val client = if (sourceLang == "hi") devanagari else latin
+        // Choose the right OCR model: Devanagari-script languages, Latin for everything else.
+        val devanagariLangs = setOf("hi", "mr", "ne", "sa")
+        val client = if (sourceLang in devanagariLangs) devanagari else latin
         val text = suspendCancellableCoroutine<com.google.mlkit.vision.text.Text?> { cont ->
             client.process(image)
                 .addOnSuccessListener { cont.resume(it) }
                 .addOnFailureListener { cont.resume(null) }
         } ?: return emptyList()
-        DeviceTranslator.prepare(sourceLang, targetLang)
+
+        // Warm up (or reuse) the translation model.
+        if (sourceLang != targetLang) DeviceTranslator.prepare(sourceLang, targetLang)
+
         return text.textBlocks.mapNotNull { block ->
             val box = block.boundingBox ?: return@mapNotNull null
             val original = block.text.replace('\n', ' ').trim()
             if (original.length < 2) return@mapNotNull null
+            val translated = if (sourceLang == targetLang) original
+                             else DeviceTranslator.translate(original, sourceLang, targetLang)
             OverlayRegion(
                 text = original,
-                translated = DeviceTranslator.translate(original, sourceLang, targetLang),
+                translated = translated,
                 x = box.left / w,
                 y = box.top / h,
                 w = box.width() / w,

@@ -12,8 +12,8 @@ android {
         applicationId = "com.metafrazo.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 4
+        versionName = "1.1.0"
         vectorDrawables { useSupportLibrary = true }
         // 127.0.0.1 works on a USB-connected phone via `adb reverse tcp:3000 tcp:3000` (and on emulators with the same reverse).
         // Override at runtime in Settings for LAN testing.

@@ -256,8 +256,10 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
                         val target = _state.value.targetLang
                         // Translate on this device when the sender did not include our language.
                         if (!trans.containsKey(target) && sourceLang != target) {
-                            DeviceTranslator.prepare(sourceLang, target)
-                            trans[target] = DeviceTranslator.translate(original, sourceLang, target)
+                            val err = DeviceTranslator.prepare(sourceLang, target)
+                            if (err == null) {
+                                trans[target] = DeviceTranslator.translate(original, sourceLang, target)
+                            }
                         }
                         val remote = CaptionItem(
                             speaker = json.optString("speaker", "Participant"),
@@ -391,59 +393,66 @@ class CaptionsViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun handleLocalTranscript(text: String, livePreview: String) {
         val s = _state.value
-        viewModelScope.launch {
-            val ts = System.currentTimeMillis() / 1000.0
-            val translations = mutableMapOf<String, String>()
-            val failures = mutableListOf<String>()
+        val ts = System.currentTimeMillis() / 1000.0
 
-            // 1) Show the final line right away in the reader's language. Reuse the live partial
-            //    translation as a placeholder so the overlay never blanks between partial and final.
+        // Step 1: Show the caption on screen immediately — only translate into the reader's own
+        // target language now (fast, one pair). Use the live partial as a placeholder until the
+        // real translation arrives so the overlay never blanks between partial and final.
+        val immediateTranslations = mutableMapOf<String, String>()
+        if (s.spokenLang != s.targetLang && livePreview.isNotBlank()) {
+            immediateTranslations[s.targetLang] = livePreview
+        }
+        val shown = CaptionItem(
+            speaker = "You",
+            sourceLang = s.spokenLang,
+            original = text,
+            translations = TranslationPlan.merge(s.spokenLang, text, immediateTranslations),
+            ts = ts,
+            isLocal = true,
+        )
+        addCaption(shown)
+
+        // Step 2: Translate into the reader's target language on the main coroutine, then
+        // replace the placeholder so the overlay updates as quickly as ML Kit responds.
+        viewModelScope.launch {
+            val translations = immediateTranslations.toMutableMap()
             if (s.spokenLang != s.targetLang) {
-                if (livePreview.isNotBlank()) translations[s.targetLang] = livePreview
                 when (val r = DeviceTranslator.translateResult(text, s.spokenLang, s.targetLang)) {
                     is TranslateResult.Translated -> translations[s.targetLang] = r.text
-                    is TranslateResult.Failed -> failures += "${s.targetLang.uppercase()}: ${r.reason}"
+                    is TranslateResult.Failed -> Log.w("CaptionsVM", "target translate failed: ${r.reason}")
                     else -> {}
                 }
             }
-            val shown = CaptionItem(
-                speaker = "You",
-                sourceLang = s.spokenLang,
-                original = text,
-                translations = TranslationPlan.merge(s.spokenLang, text, translations),
-                ts = ts,
-                isLocal = true,
-            )
-            addCaption(shown)
+            val withTarget = shown.copy(translations = TranslationPlan.merge(s.spokenLang, text, translations))
+            replaceCaption(withTarget)
+            speakAloud(withTarget)
 
-            // 2) Fan out to every other supported language for remote participants, off the
-            //    display path. One failure must not drop the others, and a silent fallback
-            //    must not masquerade as a translation.
-            for (lang in TranslationPlan.targetsFor(s.spokenLang, DeviceTranslator.supported)) {
-                if (lang == s.targetLang) continue
-                val prepError = DeviceTranslator.prepare(s.spokenLang, lang)
-                if (prepError != null) {
-                    failures += "${lang.uppercase()}: $prepError"
-                    continue
+            // Step 3: Fan out to remaining languages for remote participants on a background scope.
+            // This never blocks the display path and failures only affect remote peers.
+            uploadScope.launch {
+                val allTranslations = translations.toMutableMap()
+                val failures = mutableListOf<String>()
+                for (lang in TranslationPlan.targetsFor(s.spokenLang, DeviceTranslator.supported)) {
+                    if (lang == s.targetLang) continue
+                    val prepError = DeviceTranslator.prepare(s.spokenLang, lang)
+                    if (prepError != null) { failures += "${lang.uppercase()}: $prepError"; continue }
+                    when (val r = DeviceTranslator.translateResult(text, s.spokenLang, lang)) {
+                        is TranslateResult.Translated -> allTranslations[lang] = r.text
+                        is TranslateResult.Failed -> failures += "${lang.uppercase()}: ${r.reason}"
+                        is TranslateResult.Unsupported -> {}
+                        is TranslateResult.SameLanguage -> {}
+                    }
                 }
-                when (val r = DeviceTranslator.translateResult(text, s.spokenLang, lang)) {
-                    is TranslateResult.Translated -> translations[lang] = r.text
-                    is TranslateResult.Failed -> failures += "${lang.uppercase()}: ${r.reason}"
-                    is TranslateResult.Unsupported -> failures += "${lang.uppercase()}: unsupported"
-                    is TranslateResult.SameLanguage -> {}
+                if (failures.isNotEmpty()) Log.w("CaptionsVM", "fanout failures: ${failures.joinToString("; ")}")
+                val full = withTarget.copy(translations = TranslationPlan.merge(s.spokenLang, text, allTranslations))
+                uploader.enqueue(full)
+                uploader.flush()
+                // Publish on main thread (LiveKit SDK requirement)
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    publish(full)
                 }
             }
-            if (failures.isNotEmpty()) {
-                Log.w("CaptionsVM", "translation failures: ${failures.joinToString("; ")}")
-            }
-            val full = shown.copy(translations = TranslationPlan.merge(s.spokenLang, text, translations))
-            replaceCaption(full)
-            // Read your own sentence back in the target language so solo use is audible.
-            // Skipped for same-language by speakAloud; the mic auto-pauses while TTS plays.
-            speakAloud(full)
-            uploader.enqueue(full)
             startFlushLoop()
-            publish(full)
         }
     }
 

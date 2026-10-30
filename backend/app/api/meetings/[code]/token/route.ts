@@ -5,10 +5,12 @@ import { AccessToken } from "livekit-server-sdk";
 
 const LOCAL_HOST = /^(localhost|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)$/;
 
-// Dev only: a LAN/localhost LiveKit URL is rewritten to the host the client used to reach this backend
-// (e.g. 10.0.2.2 from the emulator, or the Mac's current LAN IP), so the signal WebSocket is reachable.
+// A loopback LiveKit URL is rewritten to the host the client used to reach this backend (e.g. the Mac's
+// current LAN IP, or 10.0.2.2 from the emulator), so the signal WebSocket is reachable. This applies in
+// every environment: `localhost` means "the device itself", which is never a usable media server, and it
+// silently breaks LAN setups whenever the backend runs a production build (`next start`). A non-loopback
+// configured URL is returned untouched, so real deployments keep their advertised host.
 function resolveLivekitUrl(req: NextRequest, configured: string): string {
-  if (process.env.NODE_ENV === "production") return configured;
   try {
     const lk = new URL(configured);
     const reqHost = (req.headers.get("x-forwarded-host") || req.headers.get("host") || "").split(",")[0].trim();

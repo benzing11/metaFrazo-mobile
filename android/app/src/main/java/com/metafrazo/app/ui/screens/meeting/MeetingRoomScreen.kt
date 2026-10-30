@@ -104,6 +104,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
+import io.livekit.android.compose.ui.ScaleType
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
@@ -277,11 +278,20 @@ fun MeetingRoomScreen(
 
     LaunchedEffect(translateScreen, screenShare?.track) {
         val track = screenShare?.track
-        if (translateScreen && track != null && screenShare.isLocal.not()) {
+        if (translateScreen && track != null) {
+            // Sync language pair from caption settings every time translation is toggled on.
+            screenTranslator.sourceLang = captionsState.spokenLang
+            screenTranslator.targetLang = captionsState.targetLang
             screenTranslator.attach(track)
         } else {
             screenTranslator.detach()
         }
+    }
+
+    // Keep screen translator language pair in sync with caption preferences.
+    LaunchedEffect(captionsState.spokenLang, captionsState.targetLang) {
+        screenTranslator.sourceLang = captionsState.spokenLang
+        screenTranslator.targetLang = captionsState.targetLang
     }
 
     MaterialTheme(colorScheme = StageColors, typography = MaterialTheme.typography, shapes = MaterialTheme.shapes) {
@@ -329,7 +339,7 @@ fun MeetingRoomScreen(
                             people = people,
                             activeSpeakers = activeSpeakers,
                             room = room,
-                            overlayEnabled = translateScreen && !screenShare.isLocal,
+                            overlayEnabled = translateScreen,
                             overlayRegions = screenTranslation.regions,
                             overlayAspect = screenTranslation.aspect,
                             overlayStatus = screenTranslation.status,
@@ -397,7 +407,7 @@ fun MeetingRoomScreen(
                         DropdownMenuItem(
                             text = { Text(if (translateScreen) "Turn off screen translation" else "Translate shared screen") },
                             leadingIcon = { Icon(Icons.Default.Translate, null) },
-                            enabled = screenShare != null && !screenShare.isLocal,
+                            enabled = screenShare != null,
                             onClick = { menuOpen = false; translateScreen = !translateScreen },
                         )
                         HorizontalDivider()
@@ -583,6 +593,9 @@ private fun SpotlightLayout(
                 isLocal = share.isLocal,
                 isScreenShare = true,
                 modifier = Modifier.fillMaxSize(),
+                // FitInside so the full frame is visible letterboxed; overlay coordinates are
+                // computed from the full frame size so they must match the display mode exactly.
+                scaleType = ScaleType.FitInside,
             )
             if (overlayEnabled) {
                 ScreenTranslateOverlay(
