@@ -19,6 +19,7 @@ import com.metafrazo.app.core.meeting.MediaServerUrl
 import com.metafrazo.app.core.network.Api
 import com.metafrazo.app.core.service.MeetingForegroundService
 import io.livekit.android.LiveKit
+import io.livekit.android.RoomOptions
 import io.livekit.android.events.RoomEvent
 import io.livekit.android.room.Room
 import io.livekit.android.room.track.LocalVideoTrack
@@ -155,7 +156,14 @@ class MeetingViewModel(private val app: Application) : ViewModel() {
     }
 
     private suspend fun connect(url: String, token: String) {
-        val r = LiveKit.create(app)
+        // Configure low-latency and bandwidth-saving settings:
+        // - adaptiveStream: pulls video at only the rendered resolution, lowering Wi-Fi load & latency
+        // - dynacast: pauses sending higher-res video layers if no receiver asks for them
+        val options = RoomOptions(
+            adaptiveStream = true,
+            dynacast = true,
+        )
+        val r = LiveKit.create(app, options)
         try {
             r.connect(url, token)
         } catch (e: Exception) {
