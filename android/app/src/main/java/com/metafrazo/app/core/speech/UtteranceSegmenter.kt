@@ -15,8 +15,8 @@ import kotlin.math.sqrt
 class UtteranceSegmenter(
     sampleRate: Int = 16_000,
     private val frameMs: Int = 20,
-    private val endSilenceMs: Int = 700,
-    private val maxUtteranceMs: Int = 8_000,
+    private val endSilenceMs: Int = 500,
+    private val maxUtteranceMs: Int = 10_000,
     private val minSpeechMs: Int = 300,
     preRollMs: Int = 300,
     private val minThreshold: Double = 400.0,

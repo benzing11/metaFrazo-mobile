@@ -218,10 +218,15 @@ async def asr(
         segments, info = model.transcribe(
             audio,
             language=language or None,
+            task="transcribe",
             beam_size=5,
+            best_of=5,
+            temperature=0.0,
             vad_filter=True,
             condition_on_previous_text=False,
-            initial_prompt=prompt,
+            # Whisper absorbs names better when the initial prompt is phrased like
+            # prior speech; keep the user's words verbatim after a short lead-in.
+            initial_prompt=(f"Transcription of a meeting. {prompt}." if prompt else None),
         )
         out = [{"text": s.text.strip(), "start": s.start, "end": s.end} for s in segments]
         return {

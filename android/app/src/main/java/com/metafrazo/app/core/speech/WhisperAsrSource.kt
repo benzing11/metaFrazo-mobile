@@ -8,6 +8,7 @@ import java.io.DataOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.ArrayBlockingQueue
+import java.util.regex.Pattern
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -70,7 +71,7 @@ class WhisperAsrSource(
             try {
                 if (!running) return@execute
                 val started = System.currentTimeMillis()
-                val text = transcribe(pcm)
+                val text = canonicalize(transcribe(pcm), prompt())
                 Log.i(TAG, "asr ${pcm.size / 32}ms audio -> ${System.currentTimeMillis() - started}ms: '$text'")
                 consecutiveFailures = 0
                 if (text.isNotBlank()) main.post { if (running) onFinal(text) }
@@ -151,6 +152,20 @@ class WhisperAsrSource(
         audio.clear()
         uploads.shutdownNow()
         main.removeCallbacksAndMessages(null)
+    }
+
+    /** Restore the configured casing of names and terms that Whisper heard but misspelled. */
+    private fun canonicalize(text: String, hardWords: String): String {
+        if (text.isBlank()) return text
+        var out = text
+        hardWords.split(',', ';').map { it.trim() }.filter { it.isNotEmpty() }.forEach { name ->
+            try {
+                val matcher = Pattern.compile("\\b" + Pattern.quote(name) + "\\b", Pattern.CASE_INSENSITIVE)
+                out = matcher.matcher(out).replaceAll(java.util.regex.Matcher.quoteReplacement(name))
+            } catch (_: Exception) {
+            }
+        }
+        return out
     }
 
     companion object {
