@@ -26,6 +26,10 @@
 - [x] Foreground service (microphone/camera type) for meeting keep-alive
 - [x] Picture-in-Picture on background when in meeting
 - [x] Reconnection state tracking
+- [x] Wireless low-latency phone-to-phone optimization: LiveKit RoomOptions (adaptiveStream + dynacast)
+- [x] Proactive peer language handshake on ParticipantConnected and Reconnected
+- [x] Low-latency progressive caption upserting (CaptionUpsert) with unit test suite
+- [x] Wireless phone-to-phone connection guide (docs/wireless-phone-connection.md)
 - [ ] Active speaker highlighting polish (events tracked; UI basic)
 - [x] Permissions rationale screen
 - [x] Recording indicator + controls in meeting UI (wired to backend)
