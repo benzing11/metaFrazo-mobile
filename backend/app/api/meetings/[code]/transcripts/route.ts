@@ -25,10 +25,16 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ code
   const mem = db.prepare("SELECT 1 FROM memberships WHERE meeting_id = ? AND user_id = ?").get(meeting.id, r.uid);
   if (!mem) return NextResponse.json({ error: "Not a member" }, { status: 403 });
   const segs = db.prepare("SELECT id, speaker_user_id, source_language, original_text, sequence, start_ms, end_ms, created_at FROM transcript_segments WHERE meeting_id = ? ORDER BY sequence ASC").all(meeting.id) as any[];
-  const out = segs.map((s) => {
-    const tr = db.prepare("SELECT target_language, translated_text FROM translation_results WHERE segment_id = ?").all(s.id);
-    return { ...s, translations: tr };
-  });
+  // Fetch every translation in one query (better-sqlite3 is sync and per-row prepares are a real perf bug on long meetings).
+  const trs = (segs.length === 0 ? [] : db.prepare(
+    `SELECT segment_id, target_language AS target_lang, translated_text AS translated_text FROM translation_results WHERE segment_id IN (${segs.map(() => "?").join(",")})`,
+  ).all(...segs.map((s) => s.id))) as any[];
+  const bySeg = new Map<string, any[]>();
+  for (const t of trs) {
+    if (!bySeg.has(t.segment_id)) bySeg.set(t.segment_id, []);
+    bySeg.get(t.segment_id)!.push({ target_language: t.target_lang, translated_text: t.translated_text });
+  }
+  const out = segs.map((s) => ({ ...s, translations: bySeg.get(s.id) ?? [] }));
   return NextResponse.json({ segments: out });
 }
 

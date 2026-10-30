@@ -27,7 +27,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ cod
     ai = { answer: "There's no transcript for this meeting yet, so I have nothing to answer from.", cited_segments: [] };
   } else {
     try {
-      ai = await callAi<AiAnswer>("/qa", { question: parsed.data.question, context: segments });
+      const raw = await callAi<AiAnswer>("/qa", { question: parsed.data.question, context: segments });
+      if (!raw || typeof raw.answer !== "string") {
+        ai = { answer: "The assistant returned an invalid response. Please try again.", cited_segments: [] };
+      } else {
+        ai = { answer: raw.answer, cited_segments: Array.isArray(raw.cited_segments) ? raw.cited_segments : [] };
+      }
     } catch {
       return NextResponse.json({ error: "Q&A service unavailable" }, { status: 502 });
     }

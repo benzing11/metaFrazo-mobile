@@ -32,8 +32,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ cod
   // membership check
   const mem = db.prepare("SELECT role FROM memberships WHERE meeting_id = ? AND user_id = ?").get(row.id, r.uid) as any;
   if (!mem) return NextResponse.json({ error: "Not a member of this meeting" }, { status: 403 });
-  const apiKey = process.env.LIVEKIT_API_KEY || "devkey";
-  const apiSecret = process.env.LIVEKIT_API_SECRET || "secret";
+  const apiKey = process.env.LIVEKIT_API_KEY;
+  const apiSecret = process.env.LIVEKIT_API_SECRET;
+  if (!apiKey || !apiSecret) {
+    console.error("LiveKit credentials are not configured (LIVEKIT_API_KEY / LIVEKIT_API_SECRET).");
+    return NextResponse.json({ error: "LiveKit is not configured on this server" }, { status: 503 });
+  }
   const url = resolveLivekitUrl(req, process.env.LIVEKIT_URL || "ws://localhost:7880");
   const user = db.prepare("SELECT display_name FROM users WHERE id = ?").get(r.uid) as { display_name: string | null } | undefined;
   const at = new AccessToken(apiKey, apiSecret, { identity: r.uid, name: user?.display_name || r.uid });
