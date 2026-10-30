@@ -32,8 +32,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ cod
   // membership check
   const mem = db.prepare("SELECT role FROM memberships WHERE meeting_id = ? AND user_id = ?").get(row.id, r.uid) as any;
   if (!mem) return NextResponse.json({ error: "Not a member of this meeting" }, { status: 403 });
-  const apiKey = process.env.LIVEKIT_API_KEY;
-  const apiSecret = process.env.LIVEKIT_API_SECRET;
+  // LiveKit keys are required in production, but dev (`livekit --dev`) uses the documented defaults so
+  // an empty backend/.env (the existing repo state) keeps working locally.
+  const isDev = process.env.NODE_ENV !== "production";
+  const apiKey = process.env.LIVEKIT_API_KEY?.trim() || (isDev ? "devkey" : null);
+  const apiSecret = process.env.LIVEKIT_API_SECRET?.trim() || (isDev ? "secret" : null);
   if (!apiKey || !apiSecret) {
     console.error("LiveKit credentials are not configured (LIVEKIT_API_KEY / LIVEKIT_API_SECRET).");
     return NextResponse.json({ error: "LiveKit is not configured on this server" }, { status: 503 });
